@@ -3,6 +3,7 @@ import logging
 
 import discord
 from discord import app_commands
+from discord.ext import voice_recv
 
 from .config import Config
 from .player_lookup import load_player_map, character_name
@@ -84,7 +85,7 @@ def _register_commands(bot: SoulogosBot) -> None:
             )
             return
 
-        vc = await target.connect()
+        vc = await target.connect(cls=voice_recv.VoiceRecvClient)
         player_map = await load_player_map(bot.config.soulogos_db_path)
         session_id = await bot.store.create_session(interaction.guild.id, target.id)
 

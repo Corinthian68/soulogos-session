@@ -9,18 +9,12 @@ discord-ext-voice-recv API:
 """
 
 import asyncio
-import logging
-import threading
 
 import discord
 import discord.opus
 from davey import MediaType
 from discord.ext import voice_recv
 
-logger = logging.getLogger(__name__)
-def _vc_dave_decrypt(self, usr_id, mtype, data):
-    return self._connection.dave_session.decrypt(usr_id, mtype, data)
-discord.VoiceClient.dave_decrypt = _vc_dave_decrypt
 # 2 seconds of stereo 16-bit PCM at 48 kHz
 _FLUSH_BYTES = 48_000 * 2 * 2 * 2
 # Minimum retained on cleanup (>= 200 ms)
@@ -36,64 +30,47 @@ class _TranscriptionSink(voice_recv.AudioSink):
         self._buffers: dict[int, bytearray] = {}
         self._display: dict[int, str] = {}
         self._decoders: dict[int, discord.opus.Decoder] = {}
-        self._lock = threading.Lock()
 
     def wants_opus(self) -> bool:
         return True
 
     def write(self, user: discord.Member, data: voice_recv.VoiceData) -> None:
-        logger.info("write() called: user=%s", getattr(user, "id", None))
+        logger.debug("write() called: user=%s", getattr(user, 'id', None))
         if user is None:
             return
-        opus_payload = getattr(data, "opus", None)
+        opus_payload = data.opus
         if not opus_payload:
             return
         uid = user.id
         try:
-            opus_bytes = self._vc.dave_decrypt(uid, MediaType.audio, bytes(opus_payload))
-            logger.info("dave_decrypt result: %s bytes", len(opus_bytes) if opus_bytes else 0)
-        except Exception as exc:
-            logger.warning("dave_decrypt failed for user %s: %s", uid, exc)
-            # DAVE E2EE may not be active on this server; try decoding raw.
-            opus_bytes = bytes(opus_payload)
-        if not opus_bytes:
+            decrypted = self._vc.dave_decrypt(uid, MediaType.audio, bytes(opus_payload))
+        except Exception:
             return
-        decoder = self._decoders.get(uid)
-        if decoder is None:
-            decoder = discord.opus.Decoder()
-            self._decoders[uid] = decoder
+        decoder = self._decoders.setdefault(uid, discord.opus.Decoder())
         try:
-            pcm = decoder.decode(opus_bytes, fec=False)
-        except discord.opus.OpusError:
+            pcm = decoder.decode(decrypted)
+        except Exception:
             return
-        chunk = None
-        with self._lock:
-            self._display[uid] = user.display_name
-            buf = self._buffers.setdefault(uid, bytearray())
-            buf.extend(pcm)
-            if len(buf) >= _FLUSH_BYTES:
-                chunk = bytes(buf)
-                self._buffers[uid] = bytearray()
-        if chunk is not None:
+        self._display[uid] = user.display_name
+        buf = self._buffers.setdefault(uid, bytearray())
+        buf.extend(pcm)
+        if len(buf) >= _FLUSH_BYTES:
+            chunk, self._buffers[uid] = bytes(buf), bytearray()
             asyncio.run_coroutine_threadsafe(
                 self._queue.put((uid, user.display_name, chunk)),
                 self._loop,
             )
 
     def cleanup(self) -> None:
-        with self._lock:
-            to_flush = [
-                (uid, self._display.get(uid, str(uid)), bytes(buf))
-                for uid, buf in self._buffers.items()
-                if len(buf) >= _MIN_FLUSH_BYTES
-            ]
-            self._buffers.clear()
-            self._decoders.clear()
-        for uid, name, chunk in to_flush:
-            asyncio.run_coroutine_threadsafe(
-                self._queue.put((uid, name, chunk)),
-                self._loop,
-            )
+        for uid, buf in self._buffers.items():
+            if len(buf) >= _MIN_FLUSH_BYTES:
+                name = self._display.get(uid, str(uid))
+                asyncio.run_coroutine_threadsafe(
+                    self._queue.put((uid, name, bytes(buf))),
+                    self._loop,
+                )
+        self._buffers.clear()
+        self._decoders.clear()
 
 
 class Recorder:
