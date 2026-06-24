@@ -101,8 +101,21 @@ class _SessionListView(discord.ui.View):
             )
             btn_tx.callback = _make_transcribe_callback(bot, sid)
 
+            btn_export = discord.ui.Button(
+                label=f"Export {sid}",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"export_{sid}",
+                row=i,
+            )
+            btn_export.callback = _make_export_callback(bot, sid)
+
             self.add_item(btn_del)
             self.add_item(btn_tx)
+            self.add_item(btn_export)
+
+
+# Channel where exported transcripts are posted (the #session-log channel).
+_SESSION_LOG_CHANNEL_ID = 1499170547601506355
 
 
 def _make_delete_callback(bot: SoulogosBot, session_id: str):
@@ -125,6 +138,62 @@ def _format_transcript(lines: list[dict]) -> str:
         f"[{line.get('timestamp', '')}] {line.get('display_name', 'Unknown')}: {line.get('text', '')}"
         for line in lines
     )
+
+
+def _format_transcript_plain(session_id: str, lines: list[dict]) -> str:
+    body = "\n".join(
+        f"**{line.get('display_name', 'Unknown')}:** {line.get('text', '')}"
+        for line in lines
+    )
+    return f"# Session Transcript: {session_id}\n\n{body}\n"
+
+
+def _format_transcript_fancy(session_id: str, lines: list[dict]) -> str:
+    body = "\n".join(
+        f"🗣️ **{line.get('display_name', 'Unknown')}:** {line.get('text', '')}"
+        for line in lines
+    )
+    return (
+        f"## 🎲 Session Transcript: {session_id}\n"
+        f"---\n"
+        f"{body}\n"
+        f"---\n"
+        f"*Transcribed by Soulogos Session*"
+    )
+
+
+def _make_export_callback(bot: SoulogosBot, session_id: str):
+    async def callback(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        lines = await bot.store.get_lines(session_id)
+        if not lines:
+            await interaction.followup.send(
+                "No transcript lines found for this session.", ephemeral=True
+            )
+            return
+
+        plain = _format_transcript_plain(session_id, lines)
+        fancy = _format_transcript_fancy(session_id, lines)
+
+        bot.config.summaries_path.mkdir(parents=True, exist_ok=True)
+        out_path = bot.config.summaries_path / f"session_{session_id}_transcript.md"
+        out_path.write_text(plain, encoding="utf-8")
+
+        await interaction.followup.send(
+            file=discord.File(str(out_path), filename=f"session_{session_id}_transcript.md"),
+            ephemeral=True,
+        )
+
+        channel = bot.get_channel(_SESSION_LOG_CHANNEL_ID)
+        if channel is not None:
+            await channel.send(fancy)
+
+        await interaction.followup.send(
+            "Transcript exported and posted to #session-log.", ephemeral=True
+        )
+
+    return callback
 
 
 def _make_transcribe_callback(bot: SoulogosBot, session_id: str):
