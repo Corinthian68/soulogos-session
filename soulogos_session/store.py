@@ -5,7 +5,7 @@ from pathlib import Path
 
 _CREATE_SESSIONS = """
 CREATE TABLE IF NOT EXISTS sessions (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          TEXT    PRIMARY KEY,
     guild_id    INTEGER NOT NULL,
     channel_id  INTEGER NOT NULL,
     started_at  TEXT    NOT NULL,
@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 _CREATE_TRANSCRIPT_LINES = """
 CREATE TABLE IF NOT EXISTS transcript_lines (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id      INTEGER NOT NULL REFERENCES sessions(id),
+    session_id      TEXT    NOT NULL REFERENCES sessions(id),
     timestamp       TEXT    NOT NULL,
     discord_user_id INTEGER NOT NULL,
     display_name    TEXT    NOT NULL,
@@ -42,16 +42,24 @@ class SessionStore:
             await db.execute(_CREATE_INDEX)
             await db.commit()
 
-    async def create_session(self, guild_id: int, channel_id: int) -> int:
+    async def create_session(self, guild_id: int, channel_id: int) -> str:
+        base_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "INSERT INTO sessions (guild_id, channel_id, started_at) VALUES (?, ?, ?)",
-                (guild_id, channel_id, _now()),
-            )
-            await db.commit()
-            return cursor.lastrowid  # type: ignore[return-value]
+            session_id = base_id
+            suffix = 1
+            while True:
+                try:
+                    await db.execute(
+                        "INSERT INTO sessions (id, guild_id, channel_id, started_at) VALUES (?, ?, ?, ?)",
+                        (session_id, guild_id, channel_id, _now()),
+                    )
+                    await db.commit()
+                    return session_id
+                except aiosqlite.IntegrityError:
+                    suffix += 1
+                    session_id = f"{base_id}_{suffix}"
 
-    async def end_session(self, session_id: int) -> None:
+    async def end_session(self, session_id: str) -> None:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 "UPDATE sessions SET ended_at = ? WHERE id = ?",
@@ -62,7 +70,7 @@ class SessionStore:
     async def add_line(
         self,
         *,
-        session_id: int,
+        session_id: str,
         discord_user_id: int,
         display_name: str,
         text: str,
@@ -79,7 +87,7 @@ class SessionStore:
             )
             await db.commit()
 
-    async def get_lines(self, session_id: int) -> list[dict]:
+    async def get_lines(self, session_id: str) -> list[dict]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
@@ -88,6 +96,42 @@ class SessionStore:
             )
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
+
+    async def list_sessions(self, guild_id: int) -> list[dict]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT s.id, s.guild_id, s.channel_id, s.started_at, s.ended_at,
+                       COUNT(l.id) AS line_count
+                FROM sessions s
+                LEFT JOIN transcript_lines l ON l.session_id = s.id
+                WHERE s.guild_id = ?
+                GROUP BY s.id
+                ORDER BY s.started_at DESC
+                """,
+                (guild_id,),
+            )
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    async def delete_session(self, session_id: str, guild_id: int | None = None) -> bool:
+        async with aiosqlite.connect(self.db_path) as db:
+            if guild_id is not None:
+                cursor = await db.execute(
+                    "SELECT id FROM sessions WHERE id = ? AND guild_id = ?",
+                    (session_id, guild_id),
+                )
+                if await cursor.fetchone() is None:
+                    return False
+            await db.execute(
+                "DELETE FROM transcript_lines WHERE session_id = ?", (session_id,)
+            )
+            cursor = await db.execute(
+                "DELETE FROM sessions WHERE id = ?", (session_id,)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
 
 def _now() -> str:

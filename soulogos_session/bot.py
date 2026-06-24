@@ -27,7 +27,7 @@ class SoulogosBot(discord.Client):
         self.transcriber = Transcriber(config.whisper_model, config.whisper_device)
 
         # Active sessions: guild_id -> (session_id, Recorder, asyncio.Task)
-        self._active: dict[int, tuple[int, Recorder, asyncio.Task]] = {}
+        self._active: dict[int, tuple[str, Recorder, asyncio.Task]] = {}
 
         _register_commands(self)
 
@@ -42,7 +42,7 @@ class SoulogosBot(discord.Client):
     async def _transcription_loop(
         self,
         queue: asyncio.Queue,
-        session_id: int,
+        session_id: str,
         player_map: dict[int, str],
     ) -> None:
         while True:
@@ -59,6 +59,53 @@ class SoulogosBot(discord.Client):
                     confidence=result.confidence,
                 )
             queue.task_done()
+
+
+class _SessionListView(discord.ui.View):
+    """Buttons for the /session-list embed. Shows up to 5 sessions (one row each)."""
+
+    def __init__(self, bot: SoulogosBot, sessions: list[dict]) -> None:
+        super().__init__(timeout=300)
+        for i, session in enumerate(sessions[:5]):
+            sid: str = session["id"]
+
+            btn_del = discord.ui.Button(
+                label=f"Delete {sid}",
+                style=discord.ButtonStyle.danger,
+                custom_id=f"del_{sid}",
+                row=i,
+            )
+            btn_del.callback = _make_delete_callback(bot, sid)
+
+            btn_tx = discord.ui.Button(
+                label=f"Transcribe {sid}",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"tx_{sid}",
+                row=i,
+            )
+            btn_tx.callback = _transcribe_callback
+
+            self.add_item(btn_del)
+            self.add_item(btn_tx)
+
+
+def _make_delete_callback(bot: SoulogosBot, session_id: str):
+    async def callback(interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        deleted = await bot.store.delete_session(session_id, guild_id=interaction.guild.id)
+        if deleted:
+            await interaction.response.send_message(
+                f"Session `{session_id}` and its transcript deleted.", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"Session `{session_id}` not found.", ephemeral=True
+            )
+    return callback
+
+
+async def _transcribe_callback(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message("Transcription coming soon", ephemeral=True)
 
 
 def _register_commands(bot: SoulogosBot) -> None:
@@ -99,9 +146,9 @@ def _register_commands(bot: SoulogosBot) -> None:
         bot._active[interaction.guild.id] = (session_id, recorder, task)
 
         await interaction.response.send_message(
-            f"Recording started in **{target.name}** (session {session_id})."
+            f"Recording started in **{target.name}** (session `{session_id}`)."
         )
-        log.info("Session %d started in guild %d / channel %d", session_id, interaction.guild.id, target.id)
+        log.info("Session %s started in guild %d / channel %d", session_id, interaction.guild.id, target.id)
 
     @bot.tree.command(name="session-end", description="Stop transcribing and leave the voice channel")
     async def session_end(interaction: discord.Interaction) -> None:
@@ -120,5 +167,51 @@ def _register_commands(bot: SoulogosBot) -> None:
             await interaction.guild.voice_client.disconnect()
 
         await bot.store.end_session(session_id)
-        await interaction.response.send_message(f"Recording ended (session {session_id}).")
-        log.info("Session %d ended in guild %d", session_id, interaction.guild.id)
+        await interaction.response.send_message(f"Recording ended (session `{session_id}`).")
+        log.info("Session %s ended in guild %d", session_id, interaction.guild.id)
+
+    @bot.tree.command(name="session-list", description="List all recording sessions for this server")
+    async def session_list(interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+
+        sessions = await bot.store.list_sessions(interaction.guild.id)
+        if not sessions:
+            await interaction.response.send_message("No sessions found for this server.", ephemeral=True)
+            return
+
+        embed = discord.Embed(title="Recording Sessions", color=discord.Color.blurple())
+        for s in sessions:
+            ended = s["ended_at"] or "In progress"
+            embed.add_field(
+                name=f"Session `{s['id']}`",
+                value=(
+                    f"**Started:** {s['started_at']}\n"
+                    f"**Ended:** {ended}\n"
+                    f"**Lines:** {s['line_count']}"
+                ),
+                inline=False,
+            )
+
+        view = _SessionListView(bot, sessions)
+        if len(sessions) > 5:
+            embed.set_footer(text=f"Showing buttons for 5 most recent of {len(sessions)} sessions. Use /session-delete for older ones.")
+
+        await interaction.response.send_message(embed=embed, view=view)
+
+    @bot.tree.command(name="session-delete", description="Delete a session and all its transcript lines")
+    @app_commands.describe(session_id="Session ID to delete (e.g. 20260624_131025)")
+    async def session_delete(
+        interaction: discord.Interaction,
+        session_id: str,
+    ) -> None:
+        assert interaction.guild is not None
+
+        deleted = await bot.store.delete_session(session_id, guild_id=interaction.guild.id)
+        if deleted:
+            await interaction.response.send_message(
+                f"Session `{session_id}` and its transcript deleted.", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"Session `{session_id}` not found in this server.", ephemeral=True
+            )
