@@ -34,7 +34,9 @@ class SoulogosBot(discord.Client):
 
     async def setup_hook(self) -> None:
         await self.store.init()
-        await self.tree.sync()
+        guild = discord.Object(id=1433893663322149067)
+        self.tree.copy_global_to(guild=guild)
+        await self.tree.sync(guild=guild)
         log.info("Commands synced.")
 
     async def on_ready(self) -> None:
@@ -48,22 +50,35 @@ class SoulogosBot(discord.Client):
     ) -> None:
         while True:
             uid, display, pcm = await queue.get()
-            result = self.transcriber.transcribe_pcm(pcm)
-            if result and result.text:
-                char = character_name(player_map, uid, display)
-                log.info("[%s / %s] %s", display, char, result.text)
-                await self.store.add_line(
-                    session_id=session_id,
-                    discord_user_id=uid,
-                    display_name=char,
-                    text=result.text,
-                    confidence=result.confidence,
+            try:
+                # Run the (blocking) Whisper call off the event loop so it can
+                # never starve the loop, and bail out if it hangs.
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(self.transcriber.transcribe_pcm, pcm),
+                    timeout=10.0,
                 )
-            queue.task_done()
+                if result and result.text:
+                    char = character_name(player_map, uid, display)
+                    log.info("[%s / %s] %s", display, char, result.text)
+                    await self.store.add_line(
+                        session_id=session_id,
+                        discord_user_id=uid,
+                        display_name=char,
+                        text=result.text,
+                        confidence=result.confidence,
+                    )
+            except asyncio.TimeoutError:
+                log.warning("transcribe timed out (>10s); skipping chunk from %s", display)
+            except Exception:
+                log.exception("transcription loop error for chunk from %s", display)
+            finally:
+                queue.task_done()
+                # Yield control so interaction handlers can run promptly.
+                await asyncio.sleep(0)
 
 
 class _SessionListView(discord.ui.View):
-    """Buttons for the /session-list embed. Shows up to 5 sessions (one row each)."""
+    """Buttons for the /capture-list embed. Shows up to 5 sessions (one row each)."""
 
     def __init__(self, bot: SoulogosBot, sessions: list[dict]) -> None:
         super().__init__(timeout=300)
@@ -79,9 +94,9 @@ class _SessionListView(discord.ui.View):
             btn_del.callback = _make_delete_callback(bot, sid)
 
             btn_tx = discord.ui.Button(
-                label=f"Transcribe {sid}",
+                label=f"capture-transcribe {sid}",
                 style=discord.ButtonStyle.secondary,
-                custom_id=f"tx_{sid}",
+                custom_id=f"capture-transcribe_{sid}",
                 row=i,
             )
             btn_tx.callback = _make_transcribe_callback(bot, sid)
@@ -172,7 +187,22 @@ def _make_transcribe_callback(bot: SoulogosBot, session_id: str):
 
 
 def _register_commands(bot: SoulogosBot) -> None:
-    @bot.tree.command(name="session-join", description="Join a voice channel and start transcribing")
+    @bot.tree.error
+    async def on_app_command_error(
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ) -> None:
+        command_name = interaction.command.name if interaction.command else "<unknown>"
+        log.exception("Unhandled error in command %s: %s", command_name, error, exc_info=error)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(f"Command error: {error}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"Command error: {error}", ephemeral=True)
+        except Exception:
+            log.exception("Failed to report command error to user")
+
+    @bot.tree.command(name="capture-join", description="Join a voice channel and start transcribing")
     @app_commands.describe(channel="Voice channel to join (defaults to your current channel)")
     async def session_join(
         interaction: discord.Interaction,
@@ -197,7 +227,8 @@ def _register_commands(bot: SoulogosBot) -> None:
             return
 
         vc = await target.connect(cls=voice_recv.VoiceRecvClient)
-        player_map = await load_player_map(bot.config.soulogos_db_path)
+        player_map = {}
+        log.info("Creating session...")
         session_id = await bot.store.create_session(interaction.guild.id, target.id)
 
         queue: asyncio.Queue = asyncio.Queue()
@@ -214,28 +245,36 @@ def _register_commands(bot: SoulogosBot) -> None:
         )
         log.info("Session %s started in guild %d / channel %d", session_id, interaction.guild.id, target.id)
 
-    @bot.tree.command(name="session-end", description="Stop transcribing and leave the voice channel")
+    @bot.tree.command(name="capture-end", description="Stop transcribing and leave the voice channel")
     async def session_end(interaction: discord.Interaction) -> None:
+        log.info("capture-end dispatched (guild=%s, user=%s)", interaction.guild_id, interaction.user.id)
         assert interaction.guild is not None
         await interaction.response.defer(ephemeral=True)
+        try:
+            entry = bot._active.pop(interaction.guild.id, None)
+            if entry is None:
+                await interaction.followup.send("No active recording in this server.", ephemeral=True)
+                return
 
-        entry = bot._active.pop(interaction.guild.id, None)
-        if entry is None:
-            await interaction.followup.send("No active recording in this server.", ephemeral=True)
-            return
+            session_id, recorder, task = entry
+            task.cancel()
+            recorder.stop()
 
-        session_id, recorder, task = entry
-        recorder.stop()
-        task.cancel()
+            if interaction.guild.voice_client:
+                asyncio.ensure_future(interaction.guild.voice_client.disconnect())
 
-        if interaction.guild.voice_client:
-            await interaction.guild.voice_client.disconnect()
+            try:
+                await asyncio.wait_for(bot.store.end_session(session_id), timeout=5.0)
+            except asyncio.TimeoutError:
+                log.warning("end_session timed out for session %s", session_id)
 
-        await bot.store.end_session(session_id)
-        await interaction.followup.send(f"Recording ended (session `{session_id}`).")
-        log.info("Session %s ended in guild %d", session_id, interaction.guild.id)
+            await interaction.followup.send(f"Recording ended (session `{session_id}`).")
+            log.info("Session %s ended in guild %d", session_id, interaction.guild.id)
+        except Exception as exc:
+            log.exception("session_end error: %s", exc)
+            await interaction.followup.send(f"Error ending session: {exc}", ephemeral=True)
 
-    @bot.tree.command(name="session-list", description="List all recording sessions for this server")
+    @bot.tree.command(name="capture-list", description="List all recording sessions for this server")
     async def session_list(interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
 
@@ -259,11 +298,11 @@ def _register_commands(bot: SoulogosBot) -> None:
 
         view = _SessionListView(bot, sessions)
         if len(sessions) > 5:
-            embed.set_footer(text=f"Showing buttons for 5 most recent of {len(sessions)} sessions. Use /session-delete for older ones.")
+            embed.set_footer(text=f"Showing buttons for 5 most recent of {len(sessions)} sessions. Use /capture-delete for older ones.")
 
         await interaction.response.send_message(embed=embed, view=view)
 
-    @bot.tree.command(name="session-delete", description="Delete a session and all its transcript lines")
+    @bot.tree.command(name="capture-delete", description="Delete a session and all its transcript lines")
     @app_commands.describe(session_id="Session ID to delete (e.g. 20260624_131025)")
     async def session_delete(
         interaction: discord.Interaction,

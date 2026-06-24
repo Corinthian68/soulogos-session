@@ -75,9 +75,8 @@ class _TranscriptionSink(voice_recv.AudioSink):
                 chunk = bytes(buf)
                 self._buffers[uid] = bytearray()
         if chunk is not None:
-            asyncio.run_coroutine_threadsafe(
-                self._queue.put((uid, user.display_name, chunk)),
-                self._loop,
+            self._loop.call_soon_threadsafe(
+                self._queue.put_nowait, (uid, user.display_name, chunk)
             )
 
     def cleanup(self) -> None:
@@ -90,9 +89,8 @@ class _TranscriptionSink(voice_recv.AudioSink):
             self._buffers.clear()
             self._decoders.clear()
         for uid, name, chunk in to_flush:
-            asyncio.run_coroutine_threadsafe(
-                self._queue.put((uid, name, chunk)),
-                self._loop,
+            self._loop.call_soon_threadsafe(
+                self._queue.put_nowait, (uid, name, chunk)
             )
 
 
