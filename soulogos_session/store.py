@@ -159,6 +159,25 @@ def _sync_delete_session(
         db.close()
 
 
+def _sync_delete_all_sessions(db_path: Path, guild_id: int) -> int:
+    db = sqlite3.connect(db_path)
+    try:
+        db.execute(
+            """
+            DELETE FROM transcript_lines
+            WHERE session_id IN (SELECT id FROM sessions WHERE guild_id = ?)
+            """,
+            (guild_id,),
+        )
+        cursor = db.execute(
+            "DELETE FROM sessions WHERE guild_id = ?", (guild_id,)
+        )
+        db.commit()
+        return cursor.rowcount
+    finally:
+        db.close()
+
+
 class SessionStore:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -202,6 +221,11 @@ class SessionStore:
     async def delete_session(self, session_id: str, guild_id: int | None = None) -> bool:
         return await asyncio.to_thread(
             _sync_delete_session, self.db_path, session_id, guild_id
+        )
+
+    async def delete_all_sessions(self, guild_id: int) -> int:
+        return await asyncio.to_thread(
+            _sync_delete_all_sessions, self.db_path, guild_id
         )
 
 

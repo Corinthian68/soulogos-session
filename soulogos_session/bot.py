@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime
 
 import anthropic
 import discord
@@ -78,11 +79,16 @@ class SoulogosBot(discord.Client):
 
 
 class _SessionListView(discord.ui.View):
-    """Buttons for the /capture-list embed. Shows up to 5 sessions (one row each)."""
+    """Buttons for the /capture-list embed.
+
+    Shows up to 4 sessions (one row each), with a single Delete All button on
+    the last row. Discord views allow only 5 rows (0-4), so the per-session
+    rows are capped at 4 to leave room for the Delete All control on row 4.
+    """
 
     def __init__(self, bot: SoulogosBot, sessions: list[dict]) -> None:
         super().__init__(timeout=300)
-        for i, session in enumerate(sessions[:5]):
+        for i, session in enumerate(sessions[:4]):
             sid: str = session["id"]
 
             btn_del = discord.ui.Button(
@@ -113,23 +119,78 @@ class _SessionListView(discord.ui.View):
             self.add_item(btn_tx)
             self.add_item(btn_export)
 
+        btn_del_all = discord.ui.Button(
+            label="Delete All Sessions",
+            style=discord.ButtonStyle.danger,
+            custom_id="del_all",
+            row=4,
+        )
+        btn_del_all.callback = _make_delete_all_callback(bot)
+        self.add_item(btn_del_all)
+
 
 # Channel where exported transcripts are posted (the #session-log channel).
 _SESSION_LOG_CHANNEL_ID = 1499170547601506355
+
+
+def _build_session_embed(sessions: list[dict]) -> discord.Embed:
+    embed = discord.Embed(title="Recording Sessions", color=discord.Color.blurple())
+    for s in sessions:
+        ended = s["ended_at"] or "In progress"
+        embed.add_field(
+            name=f"Session `{s['id']}`",
+            value=(
+                f"**Started:** {s['started_at']}\n"
+                f"**Ended:** {ended}\n"
+                f"**Lines:** {s['line_count']}"
+            ),
+            inline=False,
+        )
+    if len(sessions) > 4:
+        embed.set_footer(
+            text=f"Showing buttons for 4 most recent of {len(sessions)} sessions. Use /capture-delete for older ones."
+        )
+    return embed
 
 
 def _make_delete_callback(bot: SoulogosBot, session_id: str):
     async def callback(interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
         deleted = await bot.store.delete_session(session_id, guild_id=interaction.guild.id)
-        if deleted:
-            await interaction.response.send_message(
-                f"Session `{session_id}` and its transcript deleted.", ephemeral=True
-            )
-        else:
+        if not deleted:
             await interaction.response.send_message(
                 f"Session `{session_id}` not found.", ephemeral=True
             )
+            return
+
+        # Refresh the original list message in place.
+        sessions = await bot.store.list_sessions(interaction.guild.id)
+        try:
+            if not sessions:
+                await interaction.message.edit(content="No sessions found.", embed=None, view=None)
+            else:
+                new_embed = _build_session_embed(sessions)
+                new_view = _SessionListView(bot, sessions)
+                await interaction.message.edit(embed=new_embed, view=new_view)
+        except Exception:
+            log.exception("Failed to refresh session list after delete")
+
+        await interaction.response.send_message(
+            f"Session `{session_id}` and its transcript deleted.", ephemeral=True
+        )
+    return callback
+
+
+def _make_delete_all_callback(bot: SoulogosBot):
+    async def callback(interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        await interaction.response.defer(ephemeral=True)
+        await bot.store.delete_all_sessions(interaction.guild.id)
+        try:
+            await interaction.message.edit(content="No sessions found.", embed=None, view=None)
+        except Exception:
+            log.exception("Failed to refresh session list after delete-all")
+        await interaction.followup.send("All sessions deleted.", ephemeral=True)
     return callback
 
 
@@ -140,8 +201,20 @@ def _format_transcript(lines: list[dict]) -> str:
     )
 
 
+def _format_timestamp(ts: str) -> str:
+    """Format an ISO datetime string as HH:MM:SS. Degrades gracefully."""
+    if not ts:
+        return "--:--:--"
+    try:
+        return datetime.fromisoformat(ts).strftime("%H:%M:%S")
+    except ValueError:
+        # Best-effort fallback: slice the time portion out of the ISO string.
+        return ts[11:19] if len(ts) >= 19 else ts
+
+
 def _format_transcript_plain(session_id: str, lines: list[dict]) -> str:
     body = "\n".join(
+        f"[{_format_timestamp(line.get('timestamp', ''))}] "
         f"**{line.get('display_name', 'Unknown')}:** {line.get('text', '')}"
         for line in lines
     )
@@ -150,7 +223,8 @@ def _format_transcript_plain(session_id: str, lines: list[dict]) -> str:
 
 def _format_transcript_fancy(session_id: str, lines: list[dict]) -> str:
     body = "\n".join(
-        f"🗣️ **{line.get('display_name', 'Unknown')}:** {line.get('text', '')}"
+        f"🗣️ `[{_format_timestamp(line.get('timestamp', ''))}]` "
+        f"**{line.get('display_name', 'Unknown')}:** {line.get('text', '')}"
         for line in lines
     )
     return (
@@ -352,23 +426,8 @@ def _register_commands(bot: SoulogosBot) -> None:
             await interaction.response.send_message("No sessions found for this server.", ephemeral=True)
             return
 
-        embed = discord.Embed(title="Recording Sessions", color=discord.Color.blurple())
-        for s in sessions:
-            ended = s["ended_at"] or "In progress"
-            embed.add_field(
-                name=f"Session `{s['id']}`",
-                value=(
-                    f"**Started:** {s['started_at']}\n"
-                    f"**Ended:** {ended}\n"
-                    f"**Lines:** {s['line_count']}"
-                ),
-                inline=False,
-            )
-
+        embed = _build_session_embed(sessions)
         view = _SessionListView(bot, sessions)
-        if len(sessions) > 5:
-            embed.set_footer(text=f"Showing buttons for 5 most recent of {len(sessions)} sessions. Use /capture-delete for older ones.")
-
         await interaction.response.send_message(embed=embed, view=view)
 
     @bot.tree.command(name="capture-delete", description="Delete a session and all its transcript lines")
