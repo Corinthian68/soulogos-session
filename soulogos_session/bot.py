@@ -179,9 +179,10 @@ def _register_commands(bot: SoulogosBot) -> None:
         channel: discord.VoiceChannel | None = None,
     ) -> None:
         assert interaction.guild is not None
+        await interaction.response.defer(ephemeral=True)
 
         if interaction.guild.id in bot._active:
-            await interaction.response.send_message("Already recording in this server.", ephemeral=True)
+            await interaction.followup.send("Already recording in this server.", ephemeral=True)
             return
 
         target = channel or (
@@ -190,7 +191,7 @@ def _register_commands(bot: SoulogosBot) -> None:
             else None
         )
         if target is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Join a voice channel first, or pass one as an argument.", ephemeral=True
             )
             return
@@ -208,7 +209,7 @@ def _register_commands(bot: SoulogosBot) -> None:
         )
         bot._active[interaction.guild.id] = (session_id, recorder, task)
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Recording started in **{target.name}** (session `{session_id}`)."
         )
         log.info("Session %s started in guild %d / channel %d", session_id, interaction.guild.id, target.id)
@@ -216,10 +217,11 @@ def _register_commands(bot: SoulogosBot) -> None:
     @bot.tree.command(name="session-end", description="Stop transcribing and leave the voice channel")
     async def session_end(interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
+        await interaction.response.defer(ephemeral=True)
 
         entry = bot._active.pop(interaction.guild.id, None)
         if entry is None:
-            await interaction.response.send_message("No active recording in this server.", ephemeral=True)
+            await interaction.followup.send("No active recording in this server.", ephemeral=True)
             return
 
         session_id, recorder, task = entry
@@ -230,7 +232,7 @@ def _register_commands(bot: SoulogosBot) -> None:
             await interaction.guild.voice_client.disconnect()
 
         await bot.store.end_session(session_id)
-        await interaction.response.send_message(f"Recording ended (session `{session_id}`).")
+        await interaction.followup.send(f"Recording ended (session `{session_id}`).")
         log.info("Session %s ended in guild %d", session_id, interaction.guild.id)
 
     @bot.tree.command(name="session-list", description="List all recording sessions for this server")
