@@ -12,6 +12,8 @@ class Config:
     session_db_path: Path
     whisper_model: str
     whisper_device: str
+    anthropic_api_key: str = ""
+    summaries_path: Path = Path("data/summaries")
 
 
 def load_config() -> Config:
@@ -27,4 +29,6 @@ def load_config() -> Config:
         session_db_path=Path(os.environ.get("SESSION_DB_PATH", "data/session.sqlite")),
         whisper_model=os.environ.get("WHISPER_MODEL", "base"),
         whisper_device=os.environ.get("WHISPER_DEVICE", "cpu"),
+        anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
+        summaries_path=Path(os.environ.get("SUMMARIES_PATH", "data/summaries")),
     )

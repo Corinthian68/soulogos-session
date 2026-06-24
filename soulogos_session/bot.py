@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+import anthropic
 import discord
 from discord import app_commands
 from discord.ext import voice_recv
@@ -83,7 +84,7 @@ class _SessionListView(discord.ui.View):
                 custom_id=f"tx_{sid}",
                 row=i,
             )
-            btn_tx.callback = _transcribe_callback
+            btn_tx.callback = _make_transcribe_callback(bot, sid)
 
             self.add_item(btn_del)
             self.add_item(btn_tx)
@@ -104,8 +105,70 @@ def _make_delete_callback(bot: SoulogosBot, session_id: str):
     return callback
 
 
-async def _transcribe_callback(interaction: discord.Interaction) -> None:
-    await interaction.response.send_message("Transcription coming soon", ephemeral=True)
+def _format_transcript(lines: list[dict]) -> str:
+    return "\n".join(
+        f"[{line.get('timestamp', '')}] {line.get('display_name', 'Unknown')}: {line.get('text', '')}"
+        for line in lines
+    )
+
+
+def _make_transcribe_callback(bot: SoulogosBot, session_id: str):
+    async def callback(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        lines = await bot.store.get_lines(session_id)
+        if not lines:
+            await interaction.followup.send(
+                f"No transcript lines found for session `{session_id}`.", ephemeral=True
+            )
+            return
+
+        transcript_text = _format_transcript(lines)
+
+        try:
+            client = anthropic.AsyncAnthropic(api_key=bot.config.anthropic_api_key)
+            response = await client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=4096,
+                system=(
+                    "You are summarizing a D&D TTRPG session transcript for a Dungeon Master. "
+                    "Produce a structured markdown session summary."
+                ),
+                messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            "Please summarize this session transcript. Include these sections:\n"
+                            "- **Session Overview**\n"
+                            "- **Key Events** (in order)\n"
+                            "- **NPC Interactions**\n"
+                            "- **Player Decisions**\n"
+                            "- **Unresolved Threads**\n"
+                            "- **DM Notes for Next Session**\n\n"
+                            f"Transcript:\n\n{transcript_text}"
+                        ),
+                    }
+                ],
+            )
+            summary = response.content[0].text
+        except Exception as exc:
+            log.exception("Anthropic API error for session %s", session_id)
+            await interaction.followup.send(
+                f"Failed to generate summary: {exc}", ephemeral=True
+            )
+            return
+
+        bot.config.summaries_path.mkdir(parents=True, exist_ok=True)
+        out_path = bot.config.summaries_path / f"session_{session_id}_summary.md"
+        out_path.write_text(summary, encoding="utf-8")
+
+        await interaction.followup.send(
+            f"Summary for session `{session_id}`:",
+            file=discord.File(str(out_path), filename=f"session_{session_id}_summary.md"),
+            ephemeral=True,
+        )
+
+    return callback
 
 
 def _register_commands(bot: SoulogosBot) -> None:
