@@ -80,7 +80,9 @@ python -m soulogos_session
 
 | Command | What it does |
 | --- | --- |
-| `/capture-join [channel] [name]` | Joins a voice channel and starts transcribing. Defaults to your current voice channel if none is given. The optional `name` argument tags the session (e.g. "Crown of the Oathbreaker Session 6"). |
+| `/capture-join [channel] [name]` | Joins a voice channel and starts transcribing. Defaults to your current voice channel if none is given. The optional `name` argument tags the session (e.g. "Crown of the Oathbreaker Session 6"). Also posts an ephemeral Pause/Resume control panel. |
+| `/capture-pause` | Pauses the active recording. The bot stays in the voice channel but drops incoming audio at the sink until resumed. Ephemeral. |
+| `/capture-resume` | Resumes a paused recording. Ephemeral. |
 | `/capture-end` | Stops transcribing, leaves the voice channel, and closes out the session. |
 | `/capture-list` | Lists recording sessions for the server as a Discord embed with action buttons for each session. |
 | `/capture-delete <session_id>` | Deletes a session and all of its transcript lines by session ID. |
@@ -103,15 +105,23 @@ Writes the raw timestamped transcript to a `.md` file. Each line is formatted as
 
 ### Condense
 
-Generates a structured session debrief using the Crown summary prompt (see Prompt Files). Covers ten sections: what happened, canon facts locked, NPC state changes, arc beats per PC, threads opened, threads closed, items and resources, location at session end, next-session pressure, and carry-in knowledge state. For long sessions (over 3000 words), the transcript is processed in sections and then stitched into one unified output. Posts the file to **#prep-notes** and sends it ephemerally to you.
+Generates a structured session debrief using the Crown summary prompt (see Prompt Files). Covers ten sections: what happened, canon facts locked, NPC state changes, arc beats per PC, threads opened, threads closed, items and resources, location at session end, next-session pressure, and carry-in knowledge state. For long sessions (over 3000 words), the transcript is processed in sections and then stitched into one unified output.
+
+Condense is the first stage of the structured-log chain: it always regenerates the debrief from the raw transcript and overwrites the stored structured log at `data/logs/session_{id}_structured.md`, then posts the file to **#prep-notes** and sends it ephemerally to you. Run it again any time to rebuild the log.
 
 ### Recap
 
-Generates a player-facing prose recap using the Crown recap prompt. 200-300 words in second person, no mechanical detail, no DM-only information. For long sessions, same chunking approach as Condense. Posts the file to **#session-log** (the player-visible channel) and sends it ephemerally to you.
+Generates a player-facing prose recap using the Crown recap prompt. 200-300 words in second person, no mechanical detail, no DM-only information.
+
+Recap is the second stage of the chain: it reads the stored structured log (`data/logs/session_{id}_structured.md`) rather than the raw transcript, so the recap stays consistent with the Condense debrief. If no structured log exists yet (Condense was never run), Recap silently generates one from the transcript first, without posting it. Posts the recap file to **#session-log** (the player-visible channel) and sends it ephemerally to you.
 
 ### Delete All
 
 One button at the bottom of the embed. Deletes all sessions for this server in a single operation and refreshes the embed to show "No sessions found."
+
+## Recording Controls
+
+When you run `/capture-join`, the bot posts an ephemeral panel with **Pause Recording** and **Resume Recording** buttons, visible only to you (the command is used in a player-visible channel). Pausing drops incoming audio packets at the sink level so nothing reaches the transcription queue, while the bot stays connected to the voice channel. The same toggle is available via the `/capture-pause` and `/capture-resume` slash commands.
 
 ## Channel Configuration
 
@@ -168,8 +178,8 @@ queue -> bot.py transcription loop -> transcriber.py (Whisper) -> store.py (SQLi
 
 /capture-list buttons:
   Export   -> plain transcript .md -> #prep-notes (file) + DM (ephemeral)
-  Condense -> debrief .md via Claude -> #prep-notes (file) + DM (ephemeral)
-  Recap    -> recap .md via Claude -> #session-log (file) + DM (ephemeral)
+  Condense -> structured log .md via Claude -> data/logs/ (stored) -> #prep-notes (file) + DM (ephemeral)
+  Recap    -> recap .md via Claude (from structured log) -> #session-log (file) + DM (ephemeral)
   Transcribe -> summary .md via Claude -> #prep-notes (file) + DM (ephemeral)
 ```
 
@@ -186,4 +196,4 @@ See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 ## Version
 
-v0.1.2
+v0.1.3

@@ -25,7 +25,7 @@ async def load_player_map(db_path: Path) -> dict[int, str]:
             rows = await cursor.fetchall()
             return {int(row[0]): row[1] for row in rows if row[0] is not None}
     except Exception:
-        # Missing table, wrong schema, locked file — silently degrade.
+        # Missing table, wrong schema, locked file -- silently degrade.
         return {}
 
 

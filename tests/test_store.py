@@ -101,12 +101,12 @@ async def test_delete_session_not_found(store: SessionStore) -> None:
 async def test_delete_session_guild_scoped(store: SessionStore) -> None:
     sid = await store.create_session(guild_id=111, channel_id=1)
 
-    # Wrong guild — should not delete
+    # Wrong guild -- should not delete
     deleted = await store.delete_session(sid, guild_id=999)
     assert deleted is False
     assert len(await store.list_sessions(guild_id=111)) == 1
 
-    # Correct guild — should delete
+    # Correct guild -- should delete
     deleted = await store.delete_session(sid, guild_id=111)
     assert deleted is True
     assert await store.list_sessions(guild_id=111) == []

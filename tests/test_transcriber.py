@@ -46,5 +46,5 @@ def test_short_clip_returns_none(monkeypatch) -> None:
     tr = Transcriber.__new__(Transcriber)
     tr._model = _FakeModel()
 
-    pcm = _make_pcm(0.05)  # 50 ms — below _MIN_SAMPLES after resampling
+    pcm = _make_pcm(0.05)  # 50 ms -- below _MIN_SAMPLES after resampling
     assert tr.transcribe_pcm(pcm) is None

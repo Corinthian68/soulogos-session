@@ -6,6 +6,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.3] - 2026-06-25
+
+### Added
+
+- **Pause/Resume recording controls.** An ephemeral button panel on `/capture-join` plus `/capture-pause` and `/capture-resume` slash commands. Paused recording drops incoming audio packets at the sink level; the bot stays in the voice channel.
+- **Two-stage Condense/Recap chain.** Condense generates a structured debrief from the raw transcript using the Crown summary prompt, stores it at `data/logs/session_{id}_structured.md`, and posts to `#prep-notes`. Recap reads the stored structured log (auto-creating it silently if Condense was never run) and generates a player-facing recap from the structured log, posting to `#session-log`.
+- **Version-controlled Crown prompt files.** `crown_summary_prompt.txt` and `crown_recap_prompt.txt` under `data/prompts/` are now tracked in git.
+
+### Changed
+
+- **Recap generates from the structured log** instead of the raw transcript, keeping it consistent with the Condense debrief.
+- **Session list timestamps display in 12-hour local time** (e.g. "2026-06-25 4:05 PM") instead of raw UTC.
+
+### Fixed
+
+- **Voice connect hang.** `channel.connect()` is wrapped in a 10-second timeout with guild voice-client recovery, so a handshake that completes at the Discord level but never returns no longer strands the join.
+- **Voice-recv log spam silenced.** `discord.ext.voice_recv` INFO-level noise (rtcp packets, WS payload keys) is raised to WARNING.
+
+---
+
 ## [0.1.2] - 2026-06-24
 
 ### Added
