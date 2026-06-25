@@ -90,9 +90,10 @@ class _SessionListView(discord.ui.View):
         super().__init__(timeout=300)
         for i, session in enumerate(sessions[:4]):
             sid: str = session["id"]
+            sname: str = session.get("name") or sid
 
             btn_del = discord.ui.Button(
-                label=f"Delete {sid}",
+                label=f"Delete {sname}",
                 style=discord.ButtonStyle.danger,
                 custom_id=f"del_{sid}",
                 row=i,
@@ -100,7 +101,7 @@ class _SessionListView(discord.ui.View):
             btn_del.callback = _make_delete_callback(bot, sid)
 
             btn_tx = discord.ui.Button(
-                label=f"capture-transcribe {sid}",
+                label=f"Transcribe {sname}",
                 style=discord.ButtonStyle.secondary,
                 custom_id=f"capture-transcribe_{sid}",
                 row=i,
@@ -108,7 +109,7 @@ class _SessionListView(discord.ui.View):
             btn_tx.callback = _make_transcribe_callback(bot, sid)
 
             btn_export = discord.ui.Button(
-                label=f"Export {sid}",
+                label=f"Export {sname}",
                 style=discord.ButtonStyle.primary,
                 custom_id=f"export_{sid}",
                 row=i,
@@ -138,12 +139,8 @@ def _build_session_embed(sessions: list[dict]) -> discord.Embed:
     for s in sessions:
         ended = s["ended_at"] or "In progress"
         embed.add_field(
-            name=f"{s['name']} - `{s['id']}`" if s.get("name") else f"Session `{s['id']}`",
-            value=(
-                f"**Started:** {s['started_at']}\n"
-                f"**Ended:** {ended}\n"
-                f"**Lines:** {s['line_count']}"
-            ),
+            name=f"{s['name']} (`{s['id']}`)" if s.get("name") else f"Session `{s['id']}`",
+            value=f"**Lines:** {s['line_count']} | **Status:** {ended}",
             inline=False,
         )
     if len(sessions) > 4:
