@@ -71,6 +71,8 @@ async def test_transcribe_success(tmp_path: Path) -> None:
     mock_client = MagicMock()
     mock_client.messages.create = AsyncMock(return_value=mock_response)
     bot.store.get_session = AsyncMock(return_value={"name": "Test Session"})
+    mock_channel = AsyncMock()
+    bot.get_channel = MagicMock(return_value=mock_channel)
 
     with (
         patch("soulogos_session.bot.anthropic.AsyncAnthropic", return_value=mock_client),
