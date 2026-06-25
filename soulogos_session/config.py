@@ -14,6 +14,12 @@ class Config:
     whisper_device: str
     anthropic_api_key: str = ""
     summaries_path: Path = Path("data/summaries")
+    summary_prompt_path: Path = Path("data/prompts/crown_summary_prompt.txt")
+    recap_prompt_path: Path = Path("data/prompts/crown_recap_prompt.txt")
+    # prep-notes channel (DM only)
+    dm_channel_id: int = 1499171448043081911
+    # session-log channel (players can see it)
+    player_channel_id: int = 1499170547601506355
 
 
 def load_config() -> Config:
@@ -31,4 +37,12 @@ def load_config() -> Config:
         whisper_device=os.environ.get("WHISPER_DEVICE", "cpu"),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         summaries_path=Path(os.environ.get("SUMMARIES_PATH", "data/summaries")),
+        summary_prompt_path=Path(
+            os.environ.get("SUMMARY_PROMPT_PATH", "data/prompts/crown_summary_prompt.txt")
+        ),
+        recap_prompt_path=Path(
+            os.environ.get("RECAP_PROMPT_PATH", "data/prompts/crown_recap_prompt.txt")
+        ),
+        dm_channel_id=int(os.environ.get("DM_CHANNEL_ID", "1499171448043081911")),
+        player_channel_id=int(os.environ.get("PLAYER_CHANNEL_ID", "1499170547601506355")),
     )

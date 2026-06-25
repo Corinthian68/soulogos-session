@@ -15,6 +15,45 @@ from .transcriber import Transcriber
 
 log = logging.getLogger(__name__)
 
+# Fallbacks used when a configured prompt file cannot be read.
+_GENERIC_SUMMARY_PROMPT = (
+    "You are condensing a raw tabletop RPG session transcript into a structured "
+    "debrief for the Dungeon Master. Produce a tight, bulleted markdown summary "
+    "covering what happened, decisions made, NPC changes, open threads, resolved "
+    "threads, notable items and resources, and what to carry into next session. "
+    "No flavor language. Flag anything uncertain with [VERIFY]."
+)
+
+_GENERIC_RECAP_PROMPT = (
+    "You are writing a brief player-facing recap of a tabletop RPG session, in "
+    "second person ('The party...'). Cover what happened in order, key decisions, "
+    "what the party learned, where the session ended, and one sentence of forward "
+    "momentum. Exclude DM-only information and mechanical detail. 200-300 words of "
+    "flowing prose, no headers or bullet points."
+)
+
+
+def _load_prompt(path, fallback: str) -> str:
+    """Load prompt text from a file, falling back to a generic prompt."""
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+        if text:
+            return text
+        log.warning("Prompt file %s is empty; using generic prompt.", path)
+    except OSError as exc:
+        log.warning("Could not read prompt %s (%s); using generic prompt.", path, exc)
+    return fallback
+
+
+def _load_summary_prompt(path) -> str:
+    """Load the condense prompt text, falling back to a generic prompt."""
+    return _load_prompt(path, _GENERIC_SUMMARY_PROMPT)
+
+
+def _load_recap_prompt(path) -> str:
+    """Load the player recap prompt text, falling back to a generic prompt."""
+    return _load_prompt(path, _GENERIC_RECAP_PROMPT)
+
 
 class SoulogosBot(discord.Client):
     def __init__(self, config: Config) -> None:
@@ -27,6 +66,8 @@ class SoulogosBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.store = SessionStore(config.session_db_path)
         self.transcriber = Transcriber(config.whisper_model, config.whisper_device)
+        self.summary_prompt = _load_summary_prompt(config.summary_prompt_path)
+        self.recap_prompt = _load_recap_prompt(config.recap_prompt_path)
 
         # Active sessions: guild_id -> (session_id, Recorder, asyncio.Task)
         self._active: dict[int, tuple[str, Recorder, asyncio.Task]] = {}
@@ -116,9 +157,27 @@ class _SessionListView(discord.ui.View):
             )
             btn_export.callback = _make_export_callback(bot, sid)
 
+            btn_condense = discord.ui.Button(
+                label=f"Condense {sname}",
+                style=discord.ButtonStyle.success,
+                custom_id=f"condense_{sid}",
+                row=i,
+            )
+            btn_condense.callback = _make_condense_callback(bot, sid)
+
+            btn_recap = discord.ui.Button(
+                label=f"Recap {sname}",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"recap_{sid}",
+                row=i,
+            )
+            btn_recap.callback = _make_recap_callback(bot, sid)
+
             self.add_item(btn_del)
             self.add_item(btn_tx)
             self.add_item(btn_export)
+            self.add_item(btn_condense)
+            self.add_item(btn_recap)
 
         btn_del_all = discord.ui.Button(
             label="Delete All Sessions",
@@ -128,10 +187,6 @@ class _SessionListView(discord.ui.View):
         )
         btn_del_all.callback = _make_delete_all_callback(bot)
         self.add_item(btn_del_all)
-
-
-# Channel where exported transcripts are posted (the #session-log channel).
-_SESSION_LOG_CHANNEL_ID = 1499170547601506355
 
 
 def _build_session_embed(sessions: list[dict]) -> discord.Embed:
@@ -223,44 +278,66 @@ def _format_transcript_plain(session_id: str, lines: list[dict], name: str = "")
     return f"{header}\n\n{body}\n"
 
 
-def _format_transcript_fancy(session_id: str, lines: list[dict], name: str = "") -> str:
-    header = (
-        f"## 🎲 {name} - Session Transcript: {session_id}"
-        if name
-        else f"## 🎲 Session Transcript: {session_id}"
-    )
-    body = "\n".join(
-        f"🗣️ `[{_format_timestamp(line.get('timestamp', ''))}]` "
-        f"**{line.get('display_name', 'Unknown')}:** {line.get('text', '')}"
+def _format_transcript_timed(lines: list[dict]) -> str:
+    """Plain timed transcript for feeding to Claude: '[HH:MM:SS] name: text'."""
+    return "\n".join(
+        f"[{_format_timestamp(line.get('timestamp', ''))}] "
+        f"{line.get('display_name', 'Unknown')}: {line.get('text', '')}"
         for line in lines
     )
-    return (
-        f"{header}\n"
-        f"---\n"
-        f"{body}\n"
-        f"---\n"
-        f"*Transcribed by Soulogos Session*"
+
+
+def _chunk_by_words(text: str, max_words: int = 3000) -> list[str]:
+    """Split text into sections of at most max_words words."""
+    words = text.split()
+    if not words:
+        return [""]
+    return [" ".join(words[i:i + max_words]) for i in range(0, len(words), max_words)]
+
+
+async def _condense(client, prompt: str, content: str, max_tokens: int = 2048) -> str:
+    response = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=max_tokens,
+        system=prompt,
+        messages=[{"role": "user", "content": content}],
     )
+    return response.content[0].text
 
 
-def _chunk_message(text: str, limit: int = 1900) -> list[str]:
-    """Split text into <=limit-char chunks at line boundaries, never mid-line.
+async def _summarize_transcript(client, prompt: str, transcript_text: str, max_tokens: int) -> str:
+    """Summarize a transcript with the given prompt.
 
-    Greedy accumulation means the header lands at the start of the first chunk
-    and the footer at the end of the last chunk.
+    For transcripts over 3000 words, condense each ~3000-word section, then make
+    one more call to stitch the section summaries into a single unified result.
     """
-    chunks: list[str] = []
-    current = ""
-    for line in text.split("\n"):
-        candidate = f"{current}\n{line}" if current else line
-        if len(candidate) > limit and current:
-            chunks.append(current)
-            current = line
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    return chunks
+    if len(transcript_text.split()) > 3000:
+        sections = _chunk_by_words(transcript_text, 3000)
+        section_summaries = []
+        for idx, section in enumerate(sections, 1):
+            part = await _condense(
+                client,
+                prompt,
+                f"This is part {idx} of {len(sections)} of a single session "
+                f"transcript. Condense just this portion:\n\n{section}",
+                max_tokens,
+            )
+            section_summaries.append(part)
+        stitched = "\n\n".join(
+            f"--- Section {i} ---\n{s}" for i, s in enumerate(section_summaries, 1)
+        )
+        return await _condense(
+            client,
+            prompt,
+            "The following are per-section summaries of ONE session, in order. "
+            "Stitch them into a single unified result following the same structure "
+            "and instructions, merging duplicates and resolving contradictions:\n\n"
+            + stitched,
+            max_tokens,
+        )
+    return await _condense(
+        client, prompt, f"Session transcript:\n\n{transcript_text}", max_tokens
+    )
 
 
 def _make_export_callback(bot: SoulogosBot, session_id: str):
@@ -278,24 +355,138 @@ def _make_export_callback(bot: SoulogosBot, session_id: str):
         name = (session or {}).get("name") or ""
 
         plain = _format_transcript_plain(session_id, lines, name)
-        fancy = _format_transcript_fancy(session_id, lines, name)
 
         bot.config.summaries_path.mkdir(parents=True, exist_ok=True)
         out_path = bot.config.summaries_path / f"session_{session_id}_transcript.md"
         out_path.write_text(plain, encoding="utf-8")
+        filename = f"session_{session_id}_transcript.md"
 
+        # DM gets the file ephemerally.
         await interaction.followup.send(
-            file=discord.File(str(out_path), filename=f"session_{session_id}_transcript.md"),
+            file=discord.File(str(out_path), filename=filename),
             ephemeral=True,
         )
 
-        channel = bot.get_channel(_SESSION_LOG_CHANNEL_ID)
+        # DM-only channel gets the same file (a fresh File, since fp is consumed on send).
+        channel = bot.get_channel(bot.config.dm_channel_id)
         if channel is not None:
-            for chunk in _chunk_message(fancy):
-                await channel.send(chunk)
+            header = (
+                f"📄 **{name}** - Session Transcript" if name else f"📄 **Session {session_id}**"
+            )
+            await channel.send(header, file=discord.File(str(out_path), filename=filename))
 
         await interaction.followup.send(
-            "Transcript exported and posted to #session-log.", ephemeral=True
+            "Transcript exported and posted to #prep-notes.", ephemeral=True
+        )
+
+    return callback
+
+
+def _make_condense_callback(bot: SoulogosBot, session_id: str):
+    async def callback(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        lines = await bot.store.get_lines(session_id)
+        if not lines:
+            await interaction.followup.send(
+                "No transcript lines found for this session.", ephemeral=True
+            )
+            return
+
+        session = await bot.store.get_session(session_id)
+        name = (session or {}).get("name") or ""
+        transcript_text = _format_transcript_timed(lines)
+
+        try:
+            client = anthropic.AsyncAnthropic(api_key=bot.config.anthropic_api_key)
+            debrief = await _summarize_transcript(
+                client, bot.summary_prompt, transcript_text, max_tokens=2048
+            )
+        except Exception as exc:
+            log.exception("Anthropic API error condensing session %s", session_id)
+            await interaction.followup.send(
+                f"Failed to generate debrief: {exc}", ephemeral=True
+            )
+            return
+
+        bot.config.summaries_path.mkdir(parents=True, exist_ok=True)
+        out_path = bot.config.summaries_path / f"session_{session_id}_debrief.md"
+        out_path.write_text(debrief, encoding="utf-8")
+        filename = f"session_{session_id}_debrief.md"
+
+        # DM gets the file ephemerally.
+        await interaction.followup.send(
+            file=discord.File(str(out_path), filename=filename),
+            ephemeral=True,
+        )
+
+        # DM-only channel gets the same file (fresh File object).
+        channel = bot.get_channel(bot.config.dm_channel_id)
+        if channel is not None:
+            header = (
+                f"🎲 **{name}** - Session Debrief"
+                if name
+                else f"🎲 **Session {session_id}**"
+            )
+            await channel.send(header, file=discord.File(str(out_path), filename=filename))
+
+        await interaction.followup.send(
+            "Debrief generated and posted to #prep-notes.", ephemeral=True
+        )
+
+    return callback
+
+
+def _make_recap_callback(bot: SoulogosBot, session_id: str):
+    async def callback(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        lines = await bot.store.get_lines(session_id)
+        if not lines:
+            await interaction.followup.send(
+                "No transcript lines found for this session.", ephemeral=True
+            )
+            return
+
+        session = await bot.store.get_session(session_id)
+        name = (session or {}).get("name") or ""
+        transcript_text = _format_transcript_timed(lines)
+
+        try:
+            client = anthropic.AsyncAnthropic(api_key=bot.config.anthropic_api_key)
+            recap = await _summarize_transcript(
+                client, bot.recap_prompt, transcript_text, max_tokens=1024
+            )
+        except Exception as exc:
+            log.exception("Anthropic API error generating recap for session %s", session_id)
+            await interaction.followup.send(
+                f"Failed to generate recap: {exc}", ephemeral=True
+            )
+            return
+
+        bot.config.summaries_path.mkdir(parents=True, exist_ok=True)
+        out_path = bot.config.summaries_path / f"session_{session_id}_recap.md"
+        out_path.write_text(recap, encoding="utf-8")
+        filename = f"session_{session_id}_recap.md"
+
+        # DM gets the file ephemerally.
+        await interaction.followup.send(
+            file=discord.File(str(out_path), filename=filename),
+            ephemeral=True,
+        )
+
+        # Player-facing channel gets the same file (fresh File object).
+        channel = bot.get_channel(bot.config.player_channel_id)
+        if channel is not None:
+            header = (
+                f"📜 **{name}** - Session Recap"
+                if name
+                else f"📜 **Session {session_id}**"
+            )
+            await channel.send(header, file=discord.File(str(out_path), filename=filename))
+
+        await interaction.followup.send(
+            "Recap generated and posted to #session-log.", ephemeral=True
         )
 
     return callback

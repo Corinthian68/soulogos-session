@@ -4,13 +4,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from soulogos_session.bot import (
-    _chunk_message,
+    _chunk_by_words,
     _format_timestamp,
     _format_transcript_plain,
-    _format_transcript_fancy,
+    _format_transcript_timed,
+    _load_recap_prompt,
+    _load_summary_prompt,
+    _make_condense_callback,
     _make_export_callback,
+    _make_recap_callback,
 )
 from soulogos_session.store import SessionStore
+
+_DM_CHANNEL = 111
+_PLAYER_CHANNEL = 222
 
 
 _LINES = [
@@ -18,6 +25,8 @@ _LINES = [
     {"timestamp": "2026-06-24T13:01:42+00:00", "display_name": "DM", "text": "Roll for damage."},
 ]
 
+
+# --- formatting helpers -----------------------------------------------------
 
 def test_format_timestamp_iso() -> None:
     assert _format_timestamp("2026-06-24T13:00:05+00:00") == "13:00:05"
@@ -28,7 +37,6 @@ def test_format_timestamp_empty() -> None:
 
 
 def test_format_timestamp_bad_value_fallback() -> None:
-    # Unparseable but long enough to slice the time portion out.
     assert _format_timestamp("2026-06-24 09:08:07 garbage") == "09:08:07"
 
 
@@ -39,12 +47,52 @@ def test_format_transcript_plain_has_timestamps() -> None:
     assert "[13:01:42] **DM:** Roll for damage." in out
 
 
-def test_format_transcript_fancy_has_timestamps() -> None:
-    out = _format_transcript_fancy("20260624_130000", _LINES)
-    assert out.startswith("## 🎲 Session Transcript: 20260624_130000")
-    assert "🗣️ `[13:00:05]` **Thalindra:** I cast fireball." in out
-    assert "*Transcribed by Soulogos Session*" in out
+def test_format_plain_with_name() -> None:
+    out = _format_transcript_plain("20260624_130000", _LINES, "My Campaign")
+    assert out.startswith("# My Campaign - Session Transcript: 20260624_130000")
 
+
+def test_format_transcript_timed() -> None:
+    out = _format_transcript_timed(_LINES)
+    assert out == (
+        "[13:00:05] Thalindra: I cast fireball.\n"
+        "[13:01:42] DM: Roll for damage."
+    )
+
+
+# --- word chunker -----------------------------------------------------------
+
+def test_chunk_by_words_under_limit() -> None:
+    assert _chunk_by_words("one two three", max_words=10) == ["one two three"]
+
+
+def test_chunk_by_words_splits() -> None:
+    words = " ".join(str(i) for i in range(25))
+    chunks = _chunk_by_words(words, max_words=10)
+    assert len(chunks) == 3
+    assert all(len(c.split()) <= 10 for c in chunks)
+    # Reassembles to the original word sequence
+    assert " ".join(chunks).split() == words.split()
+
+
+def test_chunk_by_words_empty() -> None:
+    assert _chunk_by_words("", max_words=10) == [""]
+
+
+# --- summary prompt loading -------------------------------------------------
+
+def test_load_summary_prompt_reads_file(tmp_path: Path) -> None:
+    p = tmp_path / "prompt.txt"
+    p.write_text("Custom condense prompt.", encoding="utf-8")
+    assert _load_summary_prompt(p) == "Custom condense prompt."
+
+
+def test_load_summary_prompt_missing_file_falls_back(tmp_path: Path) -> None:
+    out = _load_summary_prompt(tmp_path / "does_not_exist.txt")
+    assert "condensing" in out.lower()  # generic fallback
+
+
+# --- shared test helpers ----------------------------------------------------
 
 def _make_interaction() -> MagicMock:
     interaction = MagicMock()
@@ -55,164 +103,250 @@ def _make_interaction() -> MagicMock:
     return interaction
 
 
-async def test_export_no_lines(tmp_path: Path) -> None:
+def _make_bot(
+    tmp_path: Path, lines, session, summary_prompt="PROMPT", recap_prompt="RECAP_PROMPT"
+) -> tuple[MagicMock, MagicMock]:
     store = MagicMock()
-    store.get_lines = AsyncMock(return_value=[])
+    store.get_lines = AsyncMock(return_value=lines)
+    store.get_session = AsyncMock(return_value=session)
+
     bot = MagicMock()
     bot.store = store
     bot.config = MagicMock()
     bot.config.summaries_path = tmp_path / "summaries"
+    bot.config.anthropic_api_key = "test-key"
+    bot.config.dm_channel_id = _DM_CHANNEL
+    bot.config.player_channel_id = _PLAYER_CHANNEL
+    bot.summary_prompt = summary_prompt
+    bot.recap_prompt = recap_prompt
 
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    bot.get_channel = MagicMock(return_value=channel)
+    return bot, channel
+
+
+# --- export -----------------------------------------------------------------
+
+async def test_export_no_lines(tmp_path: Path) -> None:
+    bot, _ = _make_bot(tmp_path, [], {"id": "x", "name": ""})
     interaction = _make_interaction()
-    callback = _make_export_callback(bot, "20260624_130000")
-    await callback(interaction)
+    await _make_export_callback(bot, "20260624_130000")(interaction)
 
     interaction.response.defer.assert_called_once_with(ephemeral=True)
     interaction.followup.send.assert_called_once()
     assert "No transcript lines found" in interaction.followup.send.call_args.args[0]
 
 
-async def test_export_success(tmp_path: Path) -> None:
-    store = MagicMock()
-    store.get_lines = AsyncMock(return_value=_LINES)
-    store.get_session = AsyncMock(return_value={"id": "20260624_130000", "name": ""})
-    bot = MagicMock()
-    bot.store = store
-    bot.config = MagicMock()
-    bot.config.summaries_path = tmp_path / "summaries"
-
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    bot.get_channel = MagicMock(return_value=channel)
-
+async def test_export_posts_file_to_channel(tmp_path: Path) -> None:
+    bot, channel = _make_bot(tmp_path, _LINES, {"id": "20260624_130000", "name": ""})
     interaction = _make_interaction()
 
     with patch("soulogos_session.bot.discord.File") as mock_file:
-        callback = _make_export_callback(bot, "20260624_130000")
-        await callback(interaction)
+        await _make_export_callback(bot, "20260624_130000")(interaction)
 
-    # Plain transcript written to disk
     out_path = tmp_path / "summaries" / "session_20260624_130000_transcript.md"
     assert out_path.exists()
     content = out_path.read_text(encoding="utf-8")
     assert content.startswith("# Session Transcript: 20260624_130000")
     assert "[13:00:05] **Thalindra:** I cast fireball." in content
 
-    # File posted to the DM, fancy version posted to the channel
-    mock_file.assert_called_once()
+    # A File is created for the DM and a fresh File for the channel (two total).
+    assert mock_file.call_count == 2
+
+    # Posted to the DM-only (prep-notes) channel, with the no-name header and a file kwarg.
+    bot.get_channel.assert_called_once_with(_DM_CHANNEL)
     channel.send.assert_called_once()
-    fancy = channel.send.call_args.args[0]
-    assert "🗣️ `[13:00:05]`" in fancy
+    assert channel.send.call_args.args[0] == "📄 **Session 20260624_130000**"
+    assert "file" in channel.send.call_args.kwargs
 
-    # Confirmation followup
-    assert interaction.followup.send.call_count == 2
-    assert "posted to #session-log" in interaction.followup.send.call_args.args[0]
+    # Final ephemeral confirmation
+    assert "posted to #prep-notes" in interaction.followup.send.call_args.args[0]
 
 
-async def test_export_success_with_name(tmp_path: Path) -> None:
-    store = MagicMock()
-    store.get_lines = AsyncMock(return_value=_LINES)
-    store.get_session = AsyncMock(
-        return_value={"id": "20260624_130000", "name": "Crown of the Oathbreaker S6"}
+async def test_export_channel_header_with_name(tmp_path: Path) -> None:
+    bot, channel = _make_bot(
+        tmp_path, _LINES, {"id": "20260624_130000", "name": "Crown S6"}
     )
-    bot = MagicMock()
-    bot.store = store
-    bot.config = MagicMock()
-    bot.config.summaries_path = tmp_path / "summaries"
-
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    bot.get_channel = MagicMock(return_value=channel)
-
     interaction = _make_interaction()
 
     with patch("soulogos_session.bot.discord.File"):
-        callback = _make_export_callback(bot, "20260624_130000")
-        await callback(interaction)
+        await _make_export_callback(bot, "20260624_130000")(interaction)
 
+    assert channel.send.call_args.args[0] == "📄 **Crown S6** - Session Transcript"
     out_path = tmp_path / "summaries" / "session_20260624_130000_transcript.md"
-    content = out_path.read_text(encoding="utf-8")
-    assert content.startswith("# Crown of the Oathbreaker S6 - Session Transcript: 20260624_130000")
-
-    fancy = channel.send.call_args.args[0]
-    assert fancy.startswith("## 🎲 Crown of the Oathbreaker S6 - Session Transcript: 20260624_130000")
+    assert out_path.read_text(encoding="utf-8").startswith(
+        "# Crown S6 - Session Transcript: 20260624_130000"
+    )
 
 
-def test_format_plain_with_name() -> None:
-    out = _format_transcript_plain("20260624_130000", _LINES, "My Campaign")
-    assert out.startswith("# My Campaign - Session Transcript: 20260624_130000")
+# --- condense ---------------------------------------------------------------
+
+def _mock_anthropic(text: str) -> MagicMock:
+    response = MagicMock()
+    response.content = [MagicMock(text=text)]
+    client = MagicMock()
+    client.messages.create = AsyncMock(return_value=response)
+    return client
 
 
-def test_format_fancy_with_name() -> None:
-    out = _format_transcript_fancy("20260624_130000", _LINES, "My Campaign")
-    assert out.startswith("## 🎲 My Campaign - Session Transcript: 20260624_130000")
+async def test_condense_no_lines(tmp_path: Path) -> None:
+    bot, _ = _make_bot(tmp_path, [], {"id": "x", "name": ""})
+    interaction = _make_interaction()
+    await _make_condense_callback(bot, "20260624_130000")(interaction)
+    assert "No transcript lines found" in interaction.followup.send.call_args.args[0]
 
 
-def test_chunk_message_short_single() -> None:
-    text = "## Header\n---\nline one\nline two\n---\nfooter"
-    chunks = _chunk_message(text, limit=1900)
-    assert chunks == [text]
+async def test_condense_short_single_call(tmp_path: Path) -> None:
+    bot, channel = _make_bot(tmp_path, _LINES, {"id": "20260624_130000", "name": "Crown S6"})
+    interaction = _make_interaction()
+    client = _mock_anthropic("# Debrief\n- thing happened")
+
+    with patch("soulogos_session.bot.anthropic.AsyncAnthropic", return_value=client), \
+         patch("soulogos_session.bot.discord.File"):
+        await _make_condense_callback(bot, "20260624_130000")(interaction)
+
+    # Short transcript -> exactly one Claude call
+    client.messages.create.assert_called_once()
+    assert client.messages.create.call_args.kwargs["model"] == "claude-sonnet-4-6"
+    assert client.messages.create.call_args.kwargs["max_tokens"] == 2048
+    assert client.messages.create.call_args.kwargs["system"] == "PROMPT"
+
+    out_path = tmp_path / "summaries" / "session_20260624_130000_debrief.md"
+    assert out_path.exists()
+    assert out_path.read_text(encoding="utf-8") == "# Debrief\n- thing happened"
+
+    bot.get_channel.assert_called_once_with(_DM_CHANNEL)
+    assert channel.send.call_args.args[0] == "🎲 **Crown S6** - Session Debrief"
+    assert "Debrief generated and posted to #prep-notes." == interaction.followup.send.call_args.args[0]
 
 
-def test_chunk_message_splits_at_line_boundaries() -> None:
-    header = "## 🎲 Header"
-    lines = [f"line number {i} with some content" for i in range(200)]
-    footer = "*footer*"
-    text = "\n".join([header, "---", *lines, "---", footer])
-
-    chunks = _chunk_message(text, limit=200)
-
-    # Multiple chunks produced, each within the limit
-    assert len(chunks) > 1
-    assert all(len(c) <= 200 for c in chunks)
-    # No line was split: every original line lives intact in exactly one chunk
-    rejoined = "\n".join(chunks)
-    assert rejoined.split("\n") == text.split("\n")
-    # First chunk carries the header, last chunk carries the footer
-    assert chunks[0].startswith(header)
-    assert chunks[-1].endswith(footer)
-
-
-def test_chunk_message_oversize_single_line() -> None:
-    # A single line longer than the limit becomes its own chunk (never dropped).
-    big = "x" * 300
-    chunks = _chunk_message(f"head\n{big}\ntail", limit=100)
-    assert big in chunks
-    assert "head" in chunks[0]
-    assert chunks[-1].endswith("tail")
-
-
-async def test_export_long_transcript_multiple_messages(tmp_path: Path) -> None:
-    many_lines = [
+async def test_condense_long_chunks_and_stitches(tmp_path: Path) -> None:
+    # Build a transcript well over 3000 words.
+    long_lines = [
         {
             "timestamp": "2026-06-24T13:00:00+00:00",
-            "display_name": f"Player{i}",
-            "text": "a fairly long spoken line to push the transcript well past the limit " * 3,
+            "display_name": "Player",
+            "text": " ".join(["word"] * 50),
         }
-        for i in range(80)
+        for _ in range(100)  # ~5000+ words total
     ]
-    store = MagicMock()
-    store.get_lines = AsyncMock(return_value=many_lines)
-    store.get_session = AsyncMock(return_value={"id": "20260624_130000", "name": ""})
-    bot = MagicMock()
-    bot.store = store
-    bot.config = MagicMock()
-    bot.config.summaries_path = tmp_path / "summaries"
-
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    bot.get_channel = MagicMock(return_value=channel)
-
+    bot, channel = _make_bot(tmp_path, long_lines, {"id": "20260624_130000", "name": ""})
     interaction = _make_interaction()
-    with patch("soulogos_session.bot.discord.File"):
-        callback = _make_export_callback(bot, "20260624_130000")
-        await callback(interaction)
+    client = _mock_anthropic("section/stitched debrief")
 
-    # Posted across multiple messages, each within Discord's limit
-    assert channel.send.call_count > 1
-    for call in channel.send.call_args_list:
-        assert len(call.args[0]) <= 1900
+    with patch("soulogos_session.bot.anthropic.AsyncAnthropic", return_value=client), \
+         patch("soulogos_session.bot.discord.File"):
+        await _make_condense_callback(bot, "20260624_130000")(interaction)
 
+    # More than one call: N section calls + 1 stitch call
+    assert client.messages.create.call_count >= 3
+
+    out_path = tmp_path / "summaries" / "session_20260624_130000_debrief.md"
+    assert out_path.exists()
+    assert channel.send.call_args.args[0] == "🎲 **Session 20260624_130000**"
+
+
+async def test_condense_api_error(tmp_path: Path) -> None:
+    bot, _ = _make_bot(tmp_path, _LINES, {"id": "20260624_130000", "name": ""})
+    interaction = _make_interaction()
+    client = MagicMock()
+    client.messages.create = AsyncMock(side_effect=Exception("API down"))
+
+    with patch("soulogos_session.bot.anthropic.AsyncAnthropic", return_value=client):
+        await _make_condense_callback(bot, "20260624_130000")(interaction)
+
+    assert "Failed to generate debrief" in interaction.followup.send.call_args.args[0]
+
+
+# --- recap ------------------------------------------------------------------
+
+async def test_recap_no_lines(tmp_path: Path) -> None:
+    bot, _ = _make_bot(tmp_path, [], {"id": "x", "name": ""})
+    interaction = _make_interaction()
+    await _make_recap_callback(bot, "20260624_130000")(interaction)
+    assert "No transcript lines found" in interaction.followup.send.call_args.args[0]
+
+
+async def test_recap_short_single_call(tmp_path: Path) -> None:
+    bot, channel = _make_bot(tmp_path, _LINES, {"id": "20260624_130000", "name": "Crown S6"})
+    interaction = _make_interaction()
+    client = _mock_anthropic("The party did things.")
+
+    with patch("soulogos_session.bot.anthropic.AsyncAnthropic", return_value=client), \
+         patch("soulogos_session.bot.discord.File"):
+        await _make_recap_callback(bot, "20260624_130000")(interaction)
+
+    # Recap uses the recap prompt and a 1024-token budget.
+    client.messages.create.assert_called_once()
+    assert client.messages.create.call_args.kwargs["max_tokens"] == 1024
+    assert client.messages.create.call_args.kwargs["system"] == "RECAP_PROMPT"
+    assert client.messages.create.call_args.kwargs["model"] == "claude-sonnet-4-6"
+
+    out_path = tmp_path / "summaries" / "session_20260624_130000_recap.md"
+    assert out_path.exists()
+    assert out_path.read_text(encoding="utf-8") == "The party did things."
+
+    # Posted to the player-facing (session-log) channel.
+    bot.get_channel.assert_called_once_with(_PLAYER_CHANNEL)
+    assert channel.send.call_args.args[0] == "📜 **Crown S6** - Session Recap"
+    assert "Recap generated and posted to #session-log." == interaction.followup.send.call_args.args[0]
+
+
+async def test_recap_no_name_header(tmp_path: Path) -> None:
+    bot, channel = _make_bot(tmp_path, _LINES, {"id": "20260624_130000", "name": ""})
+    interaction = _make_interaction()
+    client = _mock_anthropic("recap text")
+
+    with patch("soulogos_session.bot.anthropic.AsyncAnthropic", return_value=client), \
+         patch("soulogos_session.bot.discord.File"):
+        await _make_recap_callback(bot, "20260624_130000")(interaction)
+
+    assert channel.send.call_args.args[0] == "📜 **Session 20260624_130000**"
+
+
+async def test_recap_long_chunks_and_stitches(tmp_path: Path) -> None:
+    long_lines = [
+        {
+            "timestamp": "2026-06-24T13:00:00+00:00",
+            "display_name": "Player",
+            "text": " ".join(["word"] * 50),
+        }
+        for _ in range(100)
+    ]
+    bot, _ = _make_bot(tmp_path, long_lines, {"id": "20260624_130000", "name": ""})
+    interaction = _make_interaction()
+    client = _mock_anthropic("section/stitched recap")
+
+    with patch("soulogos_session.bot.anthropic.AsyncAnthropic", return_value=client), \
+         patch("soulogos_session.bot.discord.File"):
+        await _make_recap_callback(bot, "20260624_130000")(interaction)
+
+    assert client.messages.create.call_count >= 3
+    # Every call used the recap budget.
+    assert all(c.kwargs["max_tokens"] == 1024 for c in client.messages.create.call_args_list)
+
+
+def test_load_recap_prompt_falls_back(tmp_path: Path) -> None:
+    out = _load_recap_prompt(tmp_path / "missing.txt")
+    assert "recap" in out.lower()
+
+
+# --- config -----------------------------------------------------------------
+
+def test_config_has_channel_and_prompt_defaults() -> None:
+    import os
+    from soulogos_session.config import load_config
+
+    os.environ["DISCORD_BOT_TOKEN"] = "x"
+    cfg = load_config()
+    assert cfg.dm_channel_id == 1499171448043081911
+    assert cfg.player_channel_id == 1499170547601506355
+    assert str(cfg.summary_prompt_path) == "data/prompts/crown_summary_prompt.txt"
+    assert str(cfg.recap_prompt_path) == "data/prompts/crown_recap_prompt.txt"
+
+
+# --- store: delete-all and name (unchanged behavior) ------------------------
 
 @pytest.fixture
 async def store(tmp_path: Path) -> SessionStore:
@@ -235,13 +369,12 @@ async def test_delete_all_sessions(store: SessionStore) -> None:
 
 
 async def test_delete_all_sessions_guild_scoped(store: SessionStore) -> None:
-    sid_a = await store.create_session(guild_id=111, channel_id=1)
+    await store.create_session(guild_id=111, channel_id=1)
     sid_b = await store.create_session(guild_id=222, channel_id=2)
 
     deleted = await store.delete_all_sessions(guild_id=111)
     assert deleted == 1
     assert await store.list_sessions(guild_id=111) == []
-    # Other guild untouched
     remaining = await store.list_sessions(guild_id=222)
     assert len(remaining) == 1
     assert remaining[0]["id"] == sid_b
