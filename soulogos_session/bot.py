@@ -543,10 +543,18 @@ def _make_transcribe_callback(bot: SoulogosBot, session_id: str):
         out_path.write_text(summary, encoding="utf-8")
 
         await interaction.followup.send(
-            f"Summary for session `{session_id}`:",
+            "Summary generated and posted to #prep-notes.",
             file=discord.File(str(out_path), filename=f"session_{session_id}_summary.md"),
             ephemeral=True,
         )
+        session = await bot.store.get_session(session_id)
+        sname = (session or {}).get("name") or session_id
+        channel = bot.get_channel(bot.config.dm_channel_id)
+        if channel:
+            await channel.send(
+                f"📝 **{sname}** - Session Summary",
+                file=discord.File(str(out_path), filename=f"session_{session_id}_summary.md"),
+            )
 
     return callback
 
