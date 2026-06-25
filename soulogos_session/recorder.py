@@ -42,7 +42,7 @@ class _TranscriptionSink(voice_recv.AudioSink):
         return True
 
     def write(self, user: discord.Member, data: voice_recv.VoiceData) -> None:
-        logger.info("write() called: user=%s", getattr(user, "id", None))
+        logger.debug("write() called: user=%s", getattr(user, "id", None))
         if user is None:
             return
         opus_payload = getattr(data, "opus", None)
@@ -51,7 +51,7 @@ class _TranscriptionSink(voice_recv.AudioSink):
         uid = user.id
         try:
             opus_bytes = self._vc.dave_decrypt(uid, MediaType.audio, bytes(opus_payload))
-            logger.info("dave_decrypt result: %s bytes", len(opus_bytes) if opus_bytes else 0)
+            logger.debug("dave_decrypt result: %s bytes", len(opus_bytes) if opus_bytes else 0)
         except Exception as exc:
             logger.warning("dave_decrypt failed for user %s: %s", uid, exc)
             # DAVE E2EE may not be active on this server; try decoding raw.

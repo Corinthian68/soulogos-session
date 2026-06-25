@@ -9,6 +9,16 @@ _WHISPER_RATE = 16_000
 _RESAMPLE_RATIO = _WHISPER_RATE / _DISCORD_RATE
 _MIN_SAMPLES = int(_WHISPER_RATE * 0.1)  # skip clips shorter than 100 ms
 
+# Bias Whisper toward fantasy / TTRPG vocabulary so proper nouns and game terms
+# transcribe more reliably.
+_TTRPG_PROMPT = (
+    "Dungeons and Dragons, D&D, TTRPG, dungeon master, DM, player character, PC, "
+    "NPC, hit points, HP, armor class, AC, saving throw, spell slot, initiative, "
+    "Aglarion, Onadbyr, Crown of the Oathbreaker, tavern, dungeon, dragon, paladin, "
+    "rogue, wizard, cleric, fighter, ranger, barbarian, bard, druid, monk, sorcerer, "
+    "warlock."
+)
+
 
 @dataclass
 class TranscriptionResult:
@@ -30,7 +40,9 @@ class Transcriber:
         if len(audio) < _MIN_SAMPLES:
             return None
 
-        segments, info = self._model.transcribe(audio, beam_size=5)
+        segments, info = self._model.transcribe(
+            audio, beam_size=5, initial_prompt=_TTRPG_PROMPT
+        )
 
         texts: list[str] = []
         logprobs: list[float] = []

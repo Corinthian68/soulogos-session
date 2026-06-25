@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from soulogos_session.bot import (
+    _chunk_message,
     _format_timestamp,
     _format_transcript_plain,
     _format_transcript_fancy,
@@ -145,6 +146,72 @@ def test_format_plain_with_name() -> None:
 def test_format_fancy_with_name() -> None:
     out = _format_transcript_fancy("20260624_130000", _LINES, "My Campaign")
     assert out.startswith("## 🎲 My Campaign - Session Transcript: 20260624_130000")
+
+
+def test_chunk_message_short_single() -> None:
+    text = "## Header\n---\nline one\nline two\n---\nfooter"
+    chunks = _chunk_message(text, limit=1900)
+    assert chunks == [text]
+
+
+def test_chunk_message_splits_at_line_boundaries() -> None:
+    header = "## 🎲 Header"
+    lines = [f"line number {i} with some content" for i in range(200)]
+    footer = "*footer*"
+    text = "\n".join([header, "---", *lines, "---", footer])
+
+    chunks = _chunk_message(text, limit=200)
+
+    # Multiple chunks produced, each within the limit
+    assert len(chunks) > 1
+    assert all(len(c) <= 200 for c in chunks)
+    # No line was split: every original line lives intact in exactly one chunk
+    rejoined = "\n".join(chunks)
+    assert rejoined.split("\n") == text.split("\n")
+    # First chunk carries the header, last chunk carries the footer
+    assert chunks[0].startswith(header)
+    assert chunks[-1].endswith(footer)
+
+
+def test_chunk_message_oversize_single_line() -> None:
+    # A single line longer than the limit becomes its own chunk (never dropped).
+    big = "x" * 300
+    chunks = _chunk_message(f"head\n{big}\ntail", limit=100)
+    assert big in chunks
+    assert "head" in chunks[0]
+    assert chunks[-1].endswith("tail")
+
+
+async def test_export_long_transcript_multiple_messages(tmp_path: Path) -> None:
+    many_lines = [
+        {
+            "timestamp": "2026-06-24T13:00:00+00:00",
+            "display_name": f"Player{i}",
+            "text": "a fairly long spoken line to push the transcript well past the limit " * 3,
+        }
+        for i in range(80)
+    ]
+    store = MagicMock()
+    store.get_lines = AsyncMock(return_value=many_lines)
+    store.get_session = AsyncMock(return_value={"id": "20260624_130000", "name": ""})
+    bot = MagicMock()
+    bot.store = store
+    bot.config = MagicMock()
+    bot.config.summaries_path = tmp_path / "summaries"
+
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    bot.get_channel = MagicMock(return_value=channel)
+
+    interaction = _make_interaction()
+    with patch("soulogos_session.bot.discord.File"):
+        callback = _make_export_callback(bot, "20260624_130000")
+        await callback(interaction)
+
+    # Posted across multiple messages, each within Discord's limit
+    assert channel.send.call_count > 1
+    for call in channel.send.call_args_list:
+        assert len(call.args[0]) <= 1900
 
 
 @pytest.fixture

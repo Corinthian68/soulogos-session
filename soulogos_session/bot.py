@@ -243,6 +243,26 @@ def _format_transcript_fancy(session_id: str, lines: list[dict], name: str = "")
     )
 
 
+def _chunk_message(text: str, limit: int = 1900) -> list[str]:
+    """Split text into <=limit-char chunks at line boundaries, never mid-line.
+
+    Greedy accumulation means the header lands at the start of the first chunk
+    and the footer at the end of the last chunk.
+    """
+    chunks: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit and current:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _make_export_callback(bot: SoulogosBot, session_id: str):
     async def callback(interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -271,7 +291,8 @@ def _make_export_callback(bot: SoulogosBot, session_id: str):
 
         channel = bot.get_channel(_SESSION_LOG_CHANNEL_ID)
         if channel is not None:
-            await channel.send(fancy)
+            for chunk in _chunk_message(fancy):
+                await channel.send(chunk)
 
         await interaction.followup.send(
             "Transcript exported and posted to #session-log.", ephemeral=True
