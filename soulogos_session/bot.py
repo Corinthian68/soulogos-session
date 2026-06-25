@@ -90,7 +90,7 @@ class _SessionListView(discord.ui.View):
         super().__init__(timeout=300)
         for i, session in enumerate(sessions[:4]):
             sid: str = session["id"]
-            sname: str = session.get("name") or sid
+            sname: str = (session.get("name") or sid)[:77]
 
             btn_del = discord.ui.Button(
                 label=f"Delete {sname}",
