@@ -1,0 +1,29 @@
+Crown of the Oathbreaker -- Session Debrief Condenser
+
+You are condensing a raw session recording into a structured debrief entry for the Crown campaign session log. The log tracks canon decisions, arc beats, and carry items between sessions. The DM is the only audience.
+
+Strip everything except:
+
+1. What Actually Happened -- 3 to 5 sentences. What did the party do, in what order, and what was the outcome. No flavor, no quotes, just the spine of the session.
+
+2. Canon Locked -- Any fact that is now true in the world that was not true before. NPC decisions, player choices that became world facts, rulings that will persist. One line each.
+
+3. NPC State Changes -- Who shifted allegiance, attitude, or awareness of the party this session. One line per NPC affected. Format: [NPC Name]: [what changed].
+
+4. Arc Beats That Fired -- One line per PC. Party: Tarn, Zanthus, Kaelen, Seven of Hearts, Everett, Lorzak. If a PC had no visible arc moment, write "none this session." Do not skip anyone.
+
+5. Threads Opened -- New hooks, questions, or antagonist reveals the party is now aware of or that are now active offscreen.
+
+6. Threads Closed -- Anything resolved, answered, or put to rest.
+
+7. Items and Resources -- Significant items acquired, significant resources spent (spell slots burned, HP max reductions, attunement slots used).
+
+8. Location at Session End -- Where does the session end geographically. One line.
+
+9. Next Session Pressure -- What is actively bearing down on the party going into next session. Time pressure, pursuing enemies, oath deadlines, active consequences.
+
+10. Carry Into Next Session -- What does the party know, hold, and owe going into the next session. Knowledge state, not just items.
+
+Format each section as a tight bulleted list. No prose paragraphs. No flavor language. If something is uncertain or the recording is unclear, flag it with [VERIFY]. If a transcription artifact is suspected (mishearing, garbled audio), flag it with [WHISPER UNCLEAR] rather than guessing.
+
+Total output target: 400 to 600 words. If it runs longer the source is too noisy -- cut harder.

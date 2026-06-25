@@ -189,6 +189,76 @@ class _SessionListView(discord.ui.View):
         self.add_item(btn_del_all)
 
 
+def _active_recorder(bot: SoulogosBot, guild_id: int) -> Recorder | None:
+    """Return the live Recorder for a guild's active session, or None."""
+    entry = bot._active.get(guild_id)
+    return entry[1] if entry else None
+
+
+class _RecordingControlView(discord.ui.View):
+    """Pause/Resume controls for an active recording session.
+
+    Lives in the channel where /capture-join was called. The two buttons mirror
+    the recorder's pause flag: while recording, Pause is enabled and Resume is
+    disabled; while paused, the reverse. The bot stays in the voice channel
+    either way -- pausing only drops incoming audio.
+    """
+
+    def __init__(self, bot: SoulogosBot, guild_id: int, *, paused: bool = False) -> None:
+        super().__init__(timeout=None)
+        self._bot = bot
+        self._guild_id = guild_id
+
+        self.pause_btn = discord.ui.Button(
+            label="⏸ Pause Recording",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"capture-pause_{guild_id}",
+            disabled=paused,
+        )
+        self.pause_btn.callback = self._on_pause
+
+        self.resume_btn = discord.ui.Button(
+            label="▶ Resume Recording",
+            style=discord.ButtonStyle.success,
+            custom_id=f"capture-resume_{guild_id}",
+            disabled=not paused,
+        )
+        self.resume_btn.callback = self._on_resume
+
+        self.add_item(self.pause_btn)
+        self.add_item(self.resume_btn)
+
+    def _sync_buttons(self, paused: bool) -> None:
+        self.pause_btn.disabled = paused
+        self.resume_btn.disabled = not paused
+
+    async def _toggle(self, interaction: discord.Interaction, paused: bool) -> None:
+        recorder = _active_recorder(self._bot, self._guild_id)
+        if recorder is None:
+            # Session ended out from under the buttons; disable both.
+            self.pause_btn.disabled = True
+            self.resume_btn.disabled = True
+            await interaction.response.edit_message(view=self)
+            await interaction.followup.send("No active session.", ephemeral=True)
+            return
+
+        if paused:
+            recorder.pause()
+            message = "⏸ Recording paused."
+        else:
+            recorder.resume()
+            message = "▶ Recording resumed."
+        self._sync_buttons(paused)
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(message, ephemeral=True)
+
+    async def _on_pause(self, interaction: discord.Interaction) -> None:
+        await self._toggle(interaction, paused=True)
+
+    async def _on_resume(self, interaction: discord.Interaction) -> None:
+        await self._toggle(interaction, paused=False)
+
+
 def _build_session_embed(sessions: list[dict]) -> discord.Embed:
     embed = discord.Embed(title="Recording Sessions", color=discord.Color.blurple())
     for s in sessions:
@@ -603,7 +673,40 @@ def _register_commands(bot: SoulogosBot) -> None:
             )
             return
 
-        vc = await target.connect(cls=voice_recv.VoiceRecvClient)
+        try:
+            vc = await asyncio.wait_for(
+                target.connect(cls=voice_recv.VoiceRecvClient),
+                timeout=10.0,
+            )
+        except Exception:
+            # target.connect() can complete the handshake at the Discord level
+            # (the gateway dispatches VOICE_STATE_UPDATE and "Voice connection
+            # complete" logs) yet never return -- with voice_recv it sometimes
+            # awaits a readiness future that never resolves, hanging the join.
+            # discord.py attaches the voice client to the guild before the
+            # handshake fully settles, so on timeout we adopt that live client
+            # instead of stranding the command. Only report failure when no
+            # connected client is available.
+            recovered = interaction.guild.voice_client
+            if (
+                isinstance(recovered, voice_recv.VoiceRecvClient)
+                and recovered.is_connected()
+            ):
+                vc = recovered
+                log.warning(
+                    "target.connect() did not return for %s; recovered live "
+                    "voice client from guild",
+                    target.name,
+                    exc_info=True,
+                )
+            else:
+                log.exception("Failed to connect to voice channel %s", target.name)
+                await interaction.followup.send(
+                    f"Failed to join **{target.name}** - voice connection timed out.",
+                    ephemeral=True,
+                )
+                return
+
         player_map = {}
         log.info("Creating session...")
         session_id = await bot.store.create_session(interaction.guild.id, target.id, name)
@@ -621,7 +724,16 @@ def _register_commands(bot: SoulogosBot) -> None:
             confirmation = f"Recording started in **{target.name}** (session `{session_id}`) - {name}"
         else:
             confirmation = f"Recording started in **{target.name}** (session `{session_id}`)."
-        await interaction.followup.send(confirmation)
+        # Ephemeral so the Pause/Resume controls are visible only to whoever ran
+        # /capture-join -- this command is used in a player-visible channel.
+        # The button callbacks update this message via interaction.response.
+        # edit_message(), which works for ephemeral messages in the same
+        # interaction chain.
+        await interaction.followup.send(
+            confirmation,
+            view=_RecordingControlView(bot, interaction.guild.id),
+            ephemeral=True,
+        )
         log.info("Session %s started in guild %d / channel %d", session_id, interaction.guild.id, target.id)
 
     @bot.tree.command(name="capture-end", description="Stop transcribing and leave the voice channel")
@@ -652,6 +764,26 @@ def _register_commands(bot: SoulogosBot) -> None:
         except Exception as exc:
             log.exception("session_end error: %s", exc)
             await interaction.followup.send(f"Error ending session: {exc}", ephemeral=True)
+
+    @bot.tree.command(name="capture-pause", description="Pause the active recording (stay in the voice channel)")
+    async def session_pause(interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        recorder = _active_recorder(bot, interaction.guild.id)
+        if recorder is None:
+            await interaction.response.send_message("No active session.", ephemeral=True)
+            return
+        recorder.pause()
+        await interaction.response.send_message("⏸ Recording paused.", ephemeral=True)
+
+    @bot.tree.command(name="capture-resume", description="Resume the active recording")
+    async def session_resume(interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        recorder = _active_recorder(bot, interaction.guild.id)
+        if recorder is None:
+            await interaction.response.send_message("No active session.", ephemeral=True)
+            return
+        recorder.resume()
+        await interaction.response.send_message("▶ Recording resumed.", ephemeral=True)
 
     @bot.tree.command(name="capture-list", description="List all recording sessions for this server")
     async def session_list(interaction: discord.Interaction) -> None:

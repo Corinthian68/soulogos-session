@@ -37,6 +37,19 @@ class _TranscriptionSink(voice_recv.AudioSink):
         self._display: dict[int, str] = {}
         self._decoders: dict[int, discord.opus.Decoder] = {}
         self._lock = threading.Lock()
+        # write() runs in a background thread; pause()/resume() are called from
+        # the event loop. A threading.Event makes the flag safe across both.
+        self._paused = threading.Event()
+
+    def pause(self) -> None:
+        self._paused.set()
+
+    def resume(self) -> None:
+        self._paused.clear()
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused.is_set()
 
     def wants_opus(self) -> bool:
         return True
@@ -44,6 +57,10 @@ class _TranscriptionSink(voice_recv.AudioSink):
     def write(self, user: discord.Member, data: voice_recv.VoiceData) -> None:
         logger.debug("write() called: user=%s", getattr(user, "id", None))
         if user is None:
+            return
+        # Drop incoming audio while paused, before any decode/buffering work,
+        # so nothing reaches the transcription queue.
+        if self._paused.is_set():
             return
         opus_payload = getattr(data, "opus", None)
         if not opus_payload:
@@ -106,3 +123,15 @@ class Recorder:
 
     def stop(self) -> None:
         self._vc.stop_listening()
+
+    def pause(self) -> None:
+        """Drop incoming audio packets without leaving the voice channel."""
+        self._sink.pause()
+
+    def resume(self) -> None:
+        """Resume feeding incoming audio to the transcription queue."""
+        self._sink.resume()
+
+    @property
+    def is_paused(self) -> bool:
+        return self._sink.is_paused
