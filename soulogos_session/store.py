@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     guild_id    INTEGER NOT NULL,
     channel_id  INTEGER NOT NULL,
     started_at  TEXT    NOT NULL,
-    ended_at    TEXT
+    ended_at    TEXT,
+    name        TEXT
 )
 """
 
@@ -38,12 +39,18 @@ def _sync_init(db_path: Path) -> None:
         db.execute(_CREATE_SESSIONS)
         db.execute(_CREATE_TRANSCRIPT_LINES)
         db.execute(_CREATE_INDEX)
+        # Migrate older databases that predate the `name` column.
+        existing = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
+        if "name" not in existing:
+            db.execute("ALTER TABLE sessions ADD COLUMN name TEXT")
         db.commit()
     finally:
         db.close()
 
 
-def _sync_create_session(db_path: Path, guild_id: int, channel_id: int) -> str:
+def _sync_create_session(
+    db_path: Path, guild_id: int, channel_id: int, name: str = ""
+) -> str:
     base_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     db = sqlite3.connect(db_path)
     try:
@@ -52,8 +59,8 @@ def _sync_create_session(db_path: Path, guild_id: int, channel_id: int) -> str:
         while True:
             try:
                 db.execute(
-                    "INSERT INTO sessions (id, guild_id, channel_id, started_at) VALUES (?, ?, ?, ?)",
-                    (session_id, guild_id, channel_id, _now()),
+                    "INSERT INTO sessions (id, guild_id, channel_id, started_at, name) VALUES (?, ?, ?, ?, ?)",
+                    (session_id, guild_id, channel_id, _now(), name),
                 )
                 db.commit()
                 return session_id
@@ -113,13 +120,26 @@ def _sync_get_lines(db_path: Path, session_id: str) -> list[dict]:
         db.close()
 
 
+def _sync_get_session(db_path: Path, session_id: str) -> dict | None:
+    db = sqlite3.connect(db_path)
+    try:
+        db.row_factory = sqlite3.Row
+        cursor = db.execute(
+            "SELECT * FROM sessions WHERE id = ?", (session_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row is not None else None
+    finally:
+        db.close()
+
+
 def _sync_list_sessions(db_path: Path, guild_id: int) -> list[dict]:
     db = sqlite3.connect(db_path)
     try:
         db.row_factory = sqlite3.Row
         cursor = db.execute(
             """
-            SELECT s.id, s.guild_id, s.channel_id, s.started_at, s.ended_at,
+            SELECT s.id, s.guild_id, s.channel_id, s.started_at, s.ended_at, s.name,
                    COUNT(l.id) AS line_count
             FROM sessions s
             LEFT JOIN transcript_lines l ON l.session_id = s.id
@@ -185,10 +205,13 @@ class SessionStore:
     async def init(self) -> None:
         await asyncio.to_thread(_sync_init, self.db_path)
 
-    async def create_session(self, guild_id: int, channel_id: int) -> str:
+    async def create_session(self, guild_id: int, channel_id: int, name: str = "") -> str:
         return await asyncio.to_thread(
-            _sync_create_session, self.db_path, guild_id, channel_id
+            _sync_create_session, self.db_path, guild_id, channel_id, name
         )
+
+    async def get_session(self, session_id: str) -> dict | None:
+        return await asyncio.to_thread(_sync_get_session, self.db_path, session_id)
 
     async def end_session(self, session_id: str) -> None:
         await asyncio.to_thread(_sync_end_session, self.db_path, session_id)

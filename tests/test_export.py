@@ -74,6 +74,7 @@ async def test_export_no_lines(tmp_path: Path) -> None:
 async def test_export_success(tmp_path: Path) -> None:
     store = MagicMock()
     store.get_lines = AsyncMock(return_value=_LINES)
+    store.get_session = AsyncMock(return_value={"id": "20260624_130000", "name": ""})
     bot = MagicMock()
     bot.store = store
     bot.config = MagicMock()
@@ -93,6 +94,7 @@ async def test_export_success(tmp_path: Path) -> None:
     out_path = tmp_path / "summaries" / "session_20260624_130000_transcript.md"
     assert out_path.exists()
     content = out_path.read_text(encoding="utf-8")
+    assert content.startswith("# Session Transcript: 20260624_130000")
     assert "[13:00:05] **Thalindra:** I cast fireball." in content
 
     # File posted to the DM, fancy version posted to the channel
@@ -104,6 +106,45 @@ async def test_export_success(tmp_path: Path) -> None:
     # Confirmation followup
     assert interaction.followup.send.call_count == 2
     assert "posted to #session-log" in interaction.followup.send.call_args.args[0]
+
+
+async def test_export_success_with_name(tmp_path: Path) -> None:
+    store = MagicMock()
+    store.get_lines = AsyncMock(return_value=_LINES)
+    store.get_session = AsyncMock(
+        return_value={"id": "20260624_130000", "name": "Crown of the Oathbreaker S6"}
+    )
+    bot = MagicMock()
+    bot.store = store
+    bot.config = MagicMock()
+    bot.config.summaries_path = tmp_path / "summaries"
+
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    bot.get_channel = MagicMock(return_value=channel)
+
+    interaction = _make_interaction()
+
+    with patch("soulogos_session.bot.discord.File"):
+        callback = _make_export_callback(bot, "20260624_130000")
+        await callback(interaction)
+
+    out_path = tmp_path / "summaries" / "session_20260624_130000_transcript.md"
+    content = out_path.read_text(encoding="utf-8")
+    assert content.startswith("# Crown of the Oathbreaker S6 - Session Transcript: 20260624_130000")
+
+    fancy = channel.send.call_args.args[0]
+    assert fancy.startswith("## 🎲 Crown of the Oathbreaker S6 - Session Transcript: 20260624_130000")
+
+
+def test_format_plain_with_name() -> None:
+    out = _format_transcript_plain("20260624_130000", _LINES, "My Campaign")
+    assert out.startswith("# My Campaign - Session Transcript: 20260624_130000")
+
+
+def test_format_fancy_with_name() -> None:
+    out = _format_transcript_fancy("20260624_130000", _LINES, "My Campaign")
+    assert out.startswith("## 🎲 My Campaign - Session Transcript: 20260624_130000")
 
 
 @pytest.fixture
@@ -141,3 +182,29 @@ async def test_delete_all_sessions_guild_scoped(store: SessionStore) -> None:
 
 async def test_delete_all_sessions_empty(store: SessionStore) -> None:
     assert await store.delete_all_sessions(guild_id=999) == 0
+
+
+async def test_create_session_with_name(store: SessionStore) -> None:
+    sid = await store.create_session(guild_id=111, channel_id=1, name="Crown of the Oathbreaker S6")
+    session = await store.get_session(sid)
+    assert session is not None
+    assert session["name"] == "Crown of the Oathbreaker S6"
+
+
+async def test_create_session_without_name(store: SessionStore) -> None:
+    sid = await store.create_session(guild_id=111, channel_id=1)
+    session = await store.get_session(sid)
+    assert session is not None
+    assert (session["name"] or "") == ""
+
+
+async def test_get_session_not_found(store: SessionStore) -> None:
+    assert await store.get_session("19990101_000000") is None
+
+
+async def test_list_sessions_includes_name(store: SessionStore) -> None:
+    sid = await store.create_session(guild_id=111, channel_id=1, name="Named Session")
+    sessions = await store.list_sessions(guild_id=111)
+    assert len(sessions) == 1
+    assert sessions[0]["id"] == sid
+    assert sessions[0]["name"] == "Named Session"

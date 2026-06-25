@@ -212,23 +212,33 @@ def _format_timestamp(ts: str) -> str:
         return ts[11:19] if len(ts) >= 19 else ts
 
 
-def _format_transcript_plain(session_id: str, lines: list[dict]) -> str:
+def _format_transcript_plain(session_id: str, lines: list[dict], name: str = "") -> str:
+    header = (
+        f"# {name} - Session Transcript: {session_id}"
+        if name
+        else f"# Session Transcript: {session_id}"
+    )
     body = "\n".join(
         f"[{_format_timestamp(line.get('timestamp', ''))}] "
         f"**{line.get('display_name', 'Unknown')}:** {line.get('text', '')}"
         for line in lines
     )
-    return f"# Session Transcript: {session_id}\n\n{body}\n"
+    return f"{header}\n\n{body}\n"
 
 
-def _format_transcript_fancy(session_id: str, lines: list[dict]) -> str:
+def _format_transcript_fancy(session_id: str, lines: list[dict], name: str = "") -> str:
+    header = (
+        f"## 🎲 {name} - Session Transcript: {session_id}"
+        if name
+        else f"## 🎲 Session Transcript: {session_id}"
+    )
     body = "\n".join(
         f"🗣️ `[{_format_timestamp(line.get('timestamp', ''))}]` "
         f"**{line.get('display_name', 'Unknown')}:** {line.get('text', '')}"
         for line in lines
     )
     return (
-        f"## 🎲 Session Transcript: {session_id}\n"
+        f"{header}\n"
         f"---\n"
         f"{body}\n"
         f"---\n"
@@ -247,8 +257,11 @@ def _make_export_callback(bot: SoulogosBot, session_id: str):
             )
             return
 
-        plain = _format_transcript_plain(session_id, lines)
-        fancy = _format_transcript_fancy(session_id, lines)
+        session = await bot.store.get_session(session_id)
+        name = (session or {}).get("name") or ""
+
+        plain = _format_transcript_plain(session_id, lines, name)
+        fancy = _format_transcript_fancy(session_id, lines, name)
 
         bot.config.summaries_path.mkdir(parents=True, exist_ok=True)
         out_path = bot.config.summaries_path / f"session_{session_id}_transcript.md"
@@ -346,10 +359,14 @@ def _register_commands(bot: SoulogosBot) -> None:
             log.exception("Failed to report command error to user")
 
     @bot.tree.command(name="capture-join", description="Join a voice channel and start transcribing")
-    @app_commands.describe(channel="Voice channel to join (defaults to your current channel)")
+    @app_commands.describe(
+        channel="Voice channel to join (defaults to your current channel)",
+        name="Session name (e.g. 'Crown of the Oathbreaker Session 6')",
+    )
     async def session_join(
         interaction: discord.Interaction,
         channel: discord.VoiceChannel | None = None,
+        name: str = "",
     ) -> None:
         assert interaction.guild is not None
         await interaction.response.defer(ephemeral=True)
@@ -372,7 +389,7 @@ def _register_commands(bot: SoulogosBot) -> None:
         vc = await target.connect(cls=voice_recv.VoiceRecvClient)
         player_map = {}
         log.info("Creating session...")
-        session_id = await bot.store.create_session(interaction.guild.id, target.id)
+        session_id = await bot.store.create_session(interaction.guild.id, target.id, name)
 
         queue: asyncio.Queue = asyncio.Queue()
         recorder = Recorder(vc, queue)
@@ -383,9 +400,11 @@ def _register_commands(bot: SoulogosBot) -> None:
         )
         bot._active[interaction.guild.id] = (session_id, recorder, task)
 
-        await interaction.followup.send(
-            f"Recording started in **{target.name}** (session `{session_id}`)."
-        )
+        if name:
+            confirmation = f"Recording started in **{target.name}** (session `{session_id}`) - {name}"
+        else:
+            confirmation = f"Recording started in **{target.name}** (session `{session_id}`)."
+        await interaction.followup.send(confirmation)
         log.info("Session %s started in guild %d / channel %d", session_id, interaction.guild.id, target.id)
 
     @bot.tree.command(name="capture-end", description="Stop transcribing and leave the voice channel")
