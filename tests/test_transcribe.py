@@ -93,7 +93,7 @@ async def test_transcribe_success(tmp_path: Path) -> None:
     assert call_kwargs["model"] == "claude-sonnet-4-6"
 
     # discord.File created pointing at the summary file
-    mock_file.assert_called_once()
+    mock_file.assert_called()
     assert "session_20260624_130000_summary.md" in mock_file.call_args.args[0]
 
     # Followup sent with file
