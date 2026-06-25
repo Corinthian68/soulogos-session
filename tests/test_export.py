@@ -3,8 +3,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from datetime import datetime, timezone
+
 from soulogos_session.bot import (
     _chunk_by_words,
+    _format_status_timestamp,
     _format_timestamp,
     _format_transcript_plain,
     _format_transcript_timed,
@@ -38,6 +41,25 @@ def test_format_timestamp_empty() -> None:
 
 def test_format_timestamp_bad_value_fallback() -> None:
     assert _format_timestamp("2026-06-24 09:08:07 garbage") == "09:08:07"
+
+
+def test_format_status_timestamp_local_12h() -> None:
+    # Compare against the same UTC instant converted to local time, so the test
+    # is timezone-independent. Result must be "YYYY-MM-DD H:MM AM/PM" (no leading
+    # zero on the hour, no seconds/microseconds/offset).
+    ts = "2026-06-25T20:05:26.402869+00:00"
+    local = datetime(2026, 6, 25, 20, 5, 26, 402869, tzinfo=timezone.utc).astimezone()
+    hour = local.strftime("%I").lstrip("0") or "12"
+    expected = f"{local.strftime('%Y-%m-%d')} {hour}:{local.strftime('%M %p')}"
+    assert _format_status_timestamp(ts) == expected
+    # Shape guard: no seconds, no microseconds, no timezone offset.
+    assert ":26" not in _format_status_timestamp(ts)
+    assert "+00:00" not in _format_status_timestamp(ts)
+    assert _format_status_timestamp(ts).endswith(("AM", "PM"))
+
+
+def test_format_status_timestamp_bad_value_fallback() -> None:
+    assert _format_status_timestamp("not a timestamp") == "not a timestamp"
 
 
 def test_format_transcript_plain_has_timestamps() -> None:

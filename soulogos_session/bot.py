@@ -259,10 +259,25 @@ class _RecordingControlView(discord.ui.View):
         await self._toggle(interaction, paused=False)
 
 
+def _format_status_timestamp(ts: str) -> str:
+    """Convert a stored UTC ISO timestamp to local 12-hour time for display.
+
+    e.g. '2026-06-25T20:05:26.402869+00:00' -> '2026-06-25 4:05 PM'.
+    No seconds, microseconds, or timezone offset shown. Falls back to the raw
+    value if it cannot be parsed.
+    """
+    try:
+        local = datetime.fromisoformat(ts).astimezone()
+    except (ValueError, TypeError):
+        return ts
+    hour = local.strftime("%I").lstrip("0") or "12"
+    return f"{local.strftime('%Y-%m-%d')} {hour}:{local.strftime('%M %p')}"
+
+
 def _build_session_embed(sessions: list[dict]) -> discord.Embed:
     embed = discord.Embed(title="Recording Sessions", color=discord.Color.blurple())
     for s in sessions:
-        ended = s["ended_at"] or "In progress"
+        ended = _format_status_timestamp(s["ended_at"]) if s["ended_at"] else "In progress"
         embed.add_field(
             name=f"{s['name']} (`{s['id']}`)" if s.get("name") else f"Session `{s['id']}`",
             value=f"**Lines:** {s['line_count']} | **Status:** {ended}",
