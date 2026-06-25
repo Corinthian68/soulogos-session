@@ -138,7 +138,7 @@ def _build_session_embed(sessions: list[dict]) -> discord.Embed:
     for s in sessions:
         ended = s["ended_at"] or "In progress"
         embed.add_field(
-            name=f"Session `{s['id']}`",
+            name=f"{s['name']} - `{s['id']}`" if s.get("name") else f"Session `{s['id']}`",
             value=(
                 f"**Started:** {s['started_at']}\n"
                 f"**Ended:** {ended}\n"
