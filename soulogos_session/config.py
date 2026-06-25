@@ -14,6 +14,7 @@ class Config:
     whisper_device: str
     anthropic_api_key: str = ""
     summaries_path: Path = Path("data/summaries")
+    logs_path: Path = Path("data/logs")
     summary_prompt_path: Path = Path("data/prompts/crown_summary_prompt.txt")
     recap_prompt_path: Path = Path("data/prompts/crown_recap_prompt.txt")
     # prep-notes channel (DM only)
@@ -37,6 +38,7 @@ def load_config() -> Config:
         whisper_device=os.environ.get("WHISPER_DEVICE", "cpu"),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         summaries_path=Path(os.environ.get("SUMMARIES_PATH", "data/summaries")),
+        logs_path=Path(os.environ.get("LOGS_PATH", "data/logs")),
         summary_prompt_path=Path(
             os.environ.get("SUMMARY_PROMPT_PATH", "data/prompts/crown_summary_prompt.txt")
         ),

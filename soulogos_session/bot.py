@@ -410,6 +410,44 @@ async def _summarize_transcript(client, prompt: str, transcript_text: str, max_t
     )
 
 
+def _structured_log_path(bot: SoulogosBot, session_id: str):
+    """On-disk path for a session's stored structured log."""
+    return bot.config.logs_path / f"session_{session_id}_structured.md"
+
+
+async def _generate_structured_log(bot: SoulogosBot, session_id: str, lines: list[dict]) -> str:
+    """Condense the raw transcript into a structured log, store it, return text.
+
+    Runs crown_summary_prompt over the raw timed transcript (preserving the
+    >3000-word chunk-and-stitch handling) and OVERWRITES the stored file at
+    data/logs/session_{id}_structured.md.
+    """
+    transcript_text = _format_transcript_timed(lines)
+    client = anthropic.AsyncAnthropic(api_key=bot.config.anthropic_api_key)
+    structured = await _summarize_transcript(
+        client, bot.summary_prompt, transcript_text, max_tokens=2048
+    )
+    bot.config.logs_path.mkdir(parents=True, exist_ok=True)
+    _structured_log_path(bot, session_id).write_text(structured, encoding="utf-8")
+    return structured
+
+
+async def get_or_create_structured_log(bot: SoulogosBot, session_id: str) -> str | None:
+    """Return the structured log text for a session.
+
+    If the stored file exists, read and return it. Otherwise generate it from
+    the raw transcript, store it, and return it -- WITHOUT posting anywhere
+    (silent creation). Returns None when the session has no transcript lines.
+    """
+    path = _structured_log_path(bot, session_id)
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    lines = await bot.store.get_lines(session_id)
+    if not lines:
+        return None
+    return await _generate_structured_log(bot, session_id, lines)
+
+
 def _make_export_callback(bot: SoulogosBot, session_id: str):
     async def callback(interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -465,13 +503,11 @@ def _make_condense_callback(bot: SoulogosBot, session_id: str):
 
         session = await bot.store.get_session(session_id)
         name = (session or {}).get("name") or ""
-        transcript_text = _format_transcript_timed(lines)
 
+        # Condense is the DM's tool to (re)build the structured log: ALWAYS
+        # regenerate fresh from the raw transcript and overwrite the stored file.
         try:
-            client = anthropic.AsyncAnthropic(api_key=bot.config.anthropic_api_key)
-            debrief = await _summarize_transcript(
-                client, bot.summary_prompt, transcript_text, max_tokens=2048
-            )
+            await _generate_structured_log(bot, session_id, lines)
         except Exception as exc:
             log.exception("Anthropic API error condensing session %s", session_id)
             await interaction.followup.send(
@@ -479,10 +515,8 @@ def _make_condense_callback(bot: SoulogosBot, session_id: str):
             )
             return
 
-        bot.config.summaries_path.mkdir(parents=True, exist_ok=True)
-        out_path = bot.config.summaries_path / f"session_{session_id}_debrief.md"
-        out_path.write_text(debrief, encoding="utf-8")
-        filename = f"session_{session_id}_debrief.md"
+        out_path = _structured_log_path(bot, session_id)
+        filename = f"session_{session_id}_structured.md"
 
         # DM gets the file ephemerally.
         await interaction.followup.send(
@@ -511,8 +545,19 @@ def _make_recap_callback(bot: SoulogosBot, session_id: str):
     async def callback(interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
 
-        lines = await bot.store.get_lines(session_id)
-        if not lines:
+        # Recap is built from the STRUCTURED LOG, not the raw transcript. Obtain
+        # it (reading the stored file if present, otherwise generating it
+        # silently from the transcript).
+        try:
+            structured = await get_or_create_structured_log(bot, session_id)
+        except Exception as exc:
+            log.exception("Anthropic API error building structured log for session %s", session_id)
+            await interaction.followup.send(
+                f"Failed to generate recap: {exc}", ephemeral=True
+            )
+            return
+
+        if structured is None:
             await interaction.followup.send(
                 "No transcript lines found for this session.", ephemeral=True
             )
@@ -520,12 +565,11 @@ def _make_recap_callback(bot: SoulogosBot, session_id: str):
 
         session = await bot.store.get_session(session_id)
         name = (session or {}).get("name") or ""
-        transcript_text = _format_transcript_timed(lines)
 
         try:
             client = anthropic.AsyncAnthropic(api_key=bot.config.anthropic_api_key)
-            recap = await _summarize_transcript(
-                client, bot.recap_prompt, transcript_text, max_tokens=1024
+            recap = await _condense(
+                client, bot.recap_prompt, structured, max_tokens=1024
             )
         except Exception as exc:
             log.exception("Anthropic API error generating recap for session %s", session_id)

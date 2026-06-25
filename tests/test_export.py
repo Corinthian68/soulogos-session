@@ -114,6 +114,7 @@ def _make_bot(
     bot.store = store
     bot.config = MagicMock()
     bot.config.summaries_path = tmp_path / "summaries"
+    bot.config.logs_path = tmp_path / "logs"
     bot.config.anthropic_api_key = "test-key"
     bot.config.dm_channel_id = _DM_CHANNEL
     bot.config.player_channel_id = _PLAYER_CHANNEL
@@ -212,7 +213,8 @@ async def test_condense_short_single_call(tmp_path: Path) -> None:
     assert client.messages.create.call_args.kwargs["max_tokens"] == 2048
     assert client.messages.create.call_args.kwargs["system"] == "PROMPT"
 
-    out_path = tmp_path / "summaries" / "session_20260624_130000_debrief.md"
+    # Structured log stored under data/logs/, user-facing wording unchanged.
+    out_path = tmp_path / "logs" / "session_20260624_130000_structured.md"
     assert out_path.exists()
     assert out_path.read_text(encoding="utf-8") == "# Debrief\n- thing happened"
 
@@ -242,7 +244,7 @@ async def test_condense_long_chunks_and_stitches(tmp_path: Path) -> None:
     # More than one call: N section calls + 1 stitch call
     assert client.messages.create.call_count >= 3
 
-    out_path = tmp_path / "summaries" / "session_20260624_130000_debrief.md"
+    out_path = tmp_path / "logs" / "session_20260624_130000_structured.md"
     assert out_path.exists()
     assert channel.send.call_args.args[0] == "🎲 **Session 20260624_130000**"
 
@@ -268,7 +270,17 @@ async def test_recap_no_lines(tmp_path: Path) -> None:
     assert "No transcript lines found" in interaction.followup.send.call_args.args[0]
 
 
-async def test_recap_short_single_call(tmp_path: Path) -> None:
+def _write_structured_log(tmp_path: Path, session_id: str, content: str) -> Path:
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    path = logs_dir / f"session_{session_id}_structured.md"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+async def test_recap_reads_existing_structured_log(tmp_path: Path) -> None:
+    # A structured log already exists -> recap must read IT, not the raw transcript.
+    _write_structured_log(tmp_path, "20260624_130000", "STRUCTURED LOG BODY")
     bot, channel = _make_bot(tmp_path, _LINES, {"id": "20260624_130000", "name": "Crown S6"})
     interaction = _make_interaction()
     client = _mock_anthropic("The party did things.")
@@ -277,11 +289,20 @@ async def test_recap_short_single_call(tmp_path: Path) -> None:
          patch("soulogos_session.bot.discord.File"):
         await _make_recap_callback(bot, "20260624_130000")(interaction)
 
-    # Recap uses the recap prompt and a 1024-token budget.
+    # Exactly one Claude call (the recap) -- no condense call, since the
+    # structured log already existed.
     client.messages.create.assert_called_once()
     assert client.messages.create.call_args.kwargs["max_tokens"] == 1024
     assert client.messages.create.call_args.kwargs["system"] == "RECAP_PROMPT"
     assert client.messages.create.call_args.kwargs["model"] == "claude-sonnet-4-6"
+
+    # The recap's input IS the structured log file contents -- not the transcript.
+    sent_content = client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert sent_content == "STRUCTURED LOG BODY"
+    assert "fireball" not in sent_content  # raw transcript text must not leak in
+
+    # Reading the existing log must not touch the raw transcript at all.
+    bot.store.get_lines.assert_not_called()
 
     out_path = tmp_path / "summaries" / "session_20260624_130000_recap.md"
     assert out_path.exists()
@@ -293,38 +314,50 @@ async def test_recap_short_single_call(tmp_path: Path) -> None:
     assert "Recap generated and posted to #session-log." == interaction.followup.send.call_args.args[0]
 
 
-async def test_recap_no_name_header(tmp_path: Path) -> None:
+async def test_recap_creates_structured_log_when_missing(tmp_path: Path) -> None:
+    # No structured log yet -> recap silently builds one from the transcript
+    # (NOT posted to prep-notes), then writes the recap from that structured log.
     bot, channel = _make_bot(tmp_path, _LINES, {"id": "20260624_130000", "name": ""})
     interaction = _make_interaction()
-    client = _mock_anthropic("recap text")
+    client = _mock_anthropic("generated text")
 
     with patch("soulogos_session.bot.anthropic.AsyncAnthropic", return_value=client), \
          patch("soulogos_session.bot.discord.File"):
         await _make_recap_callback(bot, "20260624_130000")(interaction)
 
+    # Two Claude calls: condense (build structured log) then recap.
+    assert client.messages.create.call_count == 2
+    systems = [c.kwargs["system"] for c in client.messages.create.call_args_list]
+    assert systems == ["PROMPT", "RECAP_PROMPT"]
+
+    # Structured log created on disk (silently); recap also written.
+    structured_path = tmp_path / "logs" / "session_20260624_130000_structured.md"
+    assert structured_path.exists()
+    recap_path = tmp_path / "summaries" / "session_20260624_130000_recap.md"
+    assert recap_path.exists()
+
+    # Only the recap is posted (to session-log); structured-log creation is silent.
+    bot.get_channel.assert_called_once_with(_PLAYER_CHANNEL)
     assert channel.send.call_args.args[0] == "📜 **Session 20260624_130000**"
 
 
-async def test_recap_long_chunks_and_stitches(tmp_path: Path) -> None:
-    long_lines = [
-        {
-            "timestamp": "2026-06-24T13:00:00+00:00",
-            "display_name": "Player",
-            "text": " ".join(["word"] * 50),
-        }
-        for _ in range(100)
-    ]
-    bot, _ = _make_bot(tmp_path, long_lines, {"id": "20260624_130000", "name": ""})
+async def test_recap_recap_input_is_structured_not_raw(tmp_path: Path) -> None:
+    # End-to-end guard: when recap builds the log itself, the recap call's input
+    # is the structured log text (the condense output), never the raw transcript.
+    bot, _ = _make_bot(tmp_path, _LINES, {"id": "20260624_130000", "name": ""})
     interaction = _make_interaction()
-    client = _mock_anthropic("section/stitched recap")
+    client = _mock_anthropic("DEBRIEF FROM TRANSCRIPT")
 
     with patch("soulogos_session.bot.anthropic.AsyncAnthropic", return_value=client), \
          patch("soulogos_session.bot.discord.File"):
         await _make_recap_callback(bot, "20260624_130000")(interaction)
 
-    assert client.messages.create.call_count >= 3
-    # Every call used the recap budget.
-    assert all(c.kwargs["max_tokens"] == 1024 for c in client.messages.create.call_args_list)
+    # Second call is the recap; its user content is the structured log produced
+    # by the first (condense) call -- here the mock returns "DEBRIEF FROM TRANSCRIPT".
+    recap_call = client.messages.create.call_args_list[1]
+    assert recap_call.kwargs["system"] == "RECAP_PROMPT"
+    assert recap_call.kwargs["messages"][0]["content"] == "DEBRIEF FROM TRANSCRIPT"
+    assert "fireball" not in recap_call.kwargs["messages"][0]["content"]
 
 
 def test_load_recap_prompt_falls_back(tmp_path: Path) -> None:
