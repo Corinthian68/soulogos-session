@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import sys
 from datetime import datetime
 
 import anthropic
@@ -351,6 +352,7 @@ class SoulogosBot(discord.Client):
                         continue
                     char = character_name(player_map, uid, display)
                     log.info("[%s / %s] %s", display, char, text)
+                    sys.stdout.flush()
                     await self.store.add_line(
                         session_id=session_id,
                         discord_user_id=uid,
@@ -1132,3 +1134,155 @@ def _register_commands(bot: SoulogosBot) -> None:
             await interaction.response.send_message(
                 f"Session `{session_id}` not found in this server.", ephemeral=True
             )
+
+    @bot.tree.command(name="session-merge", description="Merge source sessions into a target session")
+    @app_commands.describe(
+        target_id="Session ID to merge into",
+        source_ids="Comma-separated session IDs to merge from (deleted after merge)",
+    )
+    async def session_merge(
+        interaction: discord.Interaction,
+        target_id: str,
+        source_ids: str,
+    ) -> None:
+        assert interaction.guild is not None
+        if interaction.channel_id != bot.config.dm_channel_id:
+            await interaction.response.send_message(
+                "This command can only be used in the DM channel.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        parsed = [s.strip() for s in source_ids.split(",") if s.strip()]
+        if not parsed:
+            await interaction.followup.send("No source session IDs provided.", ephemeral=True)
+            return
+
+        try:
+            result = await bot.store.merge_sessions(target_id, parsed, interaction.guild.id)
+        except ValueError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        except Exception as exc:
+            log.exception("Error merging sessions into %s", target_id)
+            await interaction.followup.send(f"Failed to merge sessions: {exc}", ephemeral=True)
+            return
+
+        msg = f"Merged {result['merged_count']} lines into session `{target_id}`."
+        if result["skipped"]:
+            skipped_list = ", ".join(f"`{s}`" for s in result["skipped"])
+            msg += f"\nSkipped (not found in this server): {skipped_list}"
+        await interaction.followup.send(msg, ephemeral=True)
+
+    @bot.tree.command(name="session-condense", description="Generate or regenerate the structured debrief for a session")
+    @app_commands.describe(session_id="Session ID to condense")
+    async def session_condense(
+        interaction: discord.Interaction,
+        session_id: str,
+    ) -> None:
+        assert interaction.guild is not None
+        if interaction.channel_id != bot.config.dm_channel_id:
+            await interaction.response.send_message(
+                "This command can only be used in the DM channel.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        lines = await bot.store.get_lines(session_id)
+        if not lines:
+            await interaction.followup.send(
+                f"No transcript lines found for session `{session_id}`.", ephemeral=True
+            )
+            return
+
+        session = await bot.store.get_session(session_id)
+        name = (session or {}).get("name") or ""
+
+        try:
+            await _generate_structured_log(bot, session_id, lines)
+        except Exception as exc:
+            log.exception("Anthropic API error condensing session %s", session_id)
+            await interaction.followup.send(f"Failed to generate debrief: {exc}", ephemeral=True)
+            return
+
+        out_path = _structured_log_path(bot, session_id)
+        filename = f"session_{session_id}_structured.md"
+
+        await interaction.followup.send(
+            file=discord.File(str(out_path), filename=filename),
+            ephemeral=True,
+        )
+
+        channel = bot.get_channel(bot.config.dm_channel_id)
+        if channel is not None:
+            header = (
+                f"🎲 **{name}** - Session Debrief"
+                if name
+                else f"🎲 **Session {session_id}**"
+            )
+            await channel.send(header, file=discord.File(str(out_path), filename=filename))
+
+        await interaction.followup.send(
+            "Debrief generated and posted to #prep-notes.", ephemeral=True
+        )
+
+    @bot.tree.command(name="session-recap", description="Generate a player-facing recap for a session")
+    @app_commands.describe(session_id="Session ID to recap")
+    async def session_recap(
+        interaction: discord.Interaction,
+        session_id: str,
+    ) -> None:
+        assert interaction.guild is not None
+        if interaction.channel_id != bot.config.dm_channel_id:
+            await interaction.response.send_message(
+                "This command can only be used in the DM channel.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            structured = await get_or_create_structured_log(bot, session_id)
+        except Exception as exc:
+            log.exception("Anthropic API error building structured log for session %s", session_id)
+            await interaction.followup.send(f"Failed to generate recap: {exc}", ephemeral=True)
+            return
+
+        if structured is None:
+            await interaction.followup.send(
+                f"No transcript lines found for session `{session_id}`.", ephemeral=True
+            )
+            return
+
+        session = await bot.store.get_session(session_id)
+        name = (session or {}).get("name") or ""
+
+        try:
+            client = anthropic.AsyncAnthropic(api_key=bot.config.anthropic_api_key)
+            recap = await _condense(client, bot.recap_prompt, structured, max_tokens=1024)
+        except Exception as exc:
+            log.exception("Anthropic API error generating recap for session %s", session_id)
+            await interaction.followup.send(f"Failed to generate recap: {exc}", ephemeral=True)
+            return
+
+        bot.config.summaries_path.mkdir(parents=True, exist_ok=True)
+        out_path = bot.config.summaries_path / f"session_{session_id}_recap.md"
+        out_path.write_text(recap, encoding="utf-8")
+        filename = f"session_{session_id}_recap.md"
+
+        await interaction.followup.send(
+            file=discord.File(str(out_path), filename=filename),
+            ephemeral=True,
+        )
+
+        channel = bot.get_channel(bot.config.player_channel_id)
+        if channel is not None:
+            header = (
+                f"📜 **{name}** - Session Recap"
+                if name
+                else f"📜 **Session {session_id}**"
+            )
+            await channel.send(header, file=discord.File(str(out_path), filename=filename))
+
+        await interaction.followup.send(
+            "Recap generated and posted to #session-log.", ephemeral=True
+        )

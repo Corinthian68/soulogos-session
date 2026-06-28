@@ -179,6 +179,41 @@ def _sync_delete_session(
         db.close()
 
 
+def _sync_merge_sessions(db_path: Path, target_id: str, source_ids: list[str], guild_id: int) -> dict:
+    """Move all transcript lines from source sessions into target, delete sources.
+    Returns dict with keys: merged_count (int), skipped (list of invalid ids)."""
+    db = sqlite3.connect(db_path)
+    try:
+        row = db.execute(
+            "SELECT id FROM sessions WHERE id = ? AND guild_id = ?",
+            (target_id, guild_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Target session {target_id!r} not found in this server.")
+
+        skipped = []
+        merged_count = 0
+
+        for source_id in source_ids:
+            if db.execute(
+                "SELECT id FROM sessions WHERE id = ? AND guild_id = ?",
+                (source_id, guild_id),
+            ).fetchone() is None:
+                skipped.append(source_id)
+                continue
+            cursor = db.execute(
+                "UPDATE transcript_lines SET session_id = ? WHERE session_id = ?",
+                (target_id, source_id),
+            )
+            merged_count += cursor.rowcount
+            db.execute("DELETE FROM sessions WHERE id = ?", (source_id,))
+
+        db.commit()
+        return {"merged_count": merged_count, "skipped": skipped}
+    finally:
+        db.close()
+
+
 def _sync_delete_all_sessions(db_path: Path, guild_id: int) -> int:
     db = sqlite3.connect(db_path)
     try:
@@ -249,6 +284,11 @@ class SessionStore:
     async def delete_all_sessions(self, guild_id: int) -> int:
         return await asyncio.to_thread(
             _sync_delete_all_sessions, self.db_path, guild_id
+        )
+
+    async def merge_sessions(self, target_id: str, source_ids: list[str], guild_id: int) -> dict:
+        return await asyncio.to_thread(
+            _sync_merge_sessions, self.db_path, target_id, source_ids, guild_id
         )
 
 
