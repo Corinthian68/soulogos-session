@@ -120,7 +120,7 @@ class SoulogosBot(discord.Client):
 
 
 class _SessionListView(discord.ui.View):
-    """Buttons for the /capture-list embed.
+    """Buttons for the /session-list embed.
 
     Shows up to 4 sessions (one row each), with a single Delete All button on
     the last row. Discord views allow only 5 rows (0-4), so the per-session
@@ -144,7 +144,7 @@ class _SessionListView(discord.ui.View):
             btn_tx = discord.ui.Button(
                 label=f"Transcribe {sname}",
                 style=discord.ButtonStyle.secondary,
-                custom_id=f"capture-transcribe_{sid}",
+                custom_id=f"session-transcribe_{sid}",
                 row=i,
             )
             btn_tx.callback = _make_transcribe_callback(bot, sid)
@@ -285,7 +285,7 @@ def _build_session_embed(sessions: list[dict]) -> discord.Embed:
         )
     if len(sessions) > 4:
         embed.set_footer(
-            text=f"Showing buttons for 4 most recent of {len(sessions)} sessions. Use /capture-delete for older ones."
+            text=f"Showing buttons for 4 most recent of {len(sessions)} sessions. Use /session-delete for older ones."
         )
     return embed
 
@@ -704,7 +704,7 @@ def _register_commands(bot: SoulogosBot) -> None:
         except Exception:
             log.exception("Failed to report command error to user")
 
-    @bot.tree.command(name="capture-join", description="Join a voice channel and start transcribing")
+    @bot.tree.command(name="session-join", description="Join a voice channel and start transcribing")
     @app_commands.describe(
         channel="Voice channel to join (defaults to your current channel)",
         name="Session name (e.g. 'Crown of the Oathbreaker Session 6')",
@@ -795,9 +795,9 @@ def _register_commands(bot: SoulogosBot) -> None:
         )
         log.info("Session %s started in guild %d / channel %d", session_id, interaction.guild.id, target.id)
 
-    @bot.tree.command(name="capture-end", description="Stop transcribing and leave the voice channel")
+    @bot.tree.command(name="session-end", description="Stop transcribing and leave the voice channel")
     async def session_end(interaction: discord.Interaction) -> None:
-        log.info("capture-end dispatched (guild=%s, user=%s)", interaction.guild_id, interaction.user.id)
+        log.info("session-end dispatched (guild=%s, user=%s)", interaction.guild_id, interaction.user.id)
         assert interaction.guild is not None
         await interaction.response.defer(ephemeral=True)
         try:
@@ -824,7 +824,7 @@ def _register_commands(bot: SoulogosBot) -> None:
             log.exception("session_end error: %s", exc)
             await interaction.followup.send(f"Error ending session: {exc}", ephemeral=True)
 
-    @bot.tree.command(name="capture-pause", description="Pause the active recording (stay in the voice channel)")
+    @bot.tree.command(name="session-pause", description="Pause the active recording (stay in the voice channel)")
     async def session_pause(interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
         recorder = _active_recorder(bot, interaction.guild.id)
@@ -834,7 +834,7 @@ def _register_commands(bot: SoulogosBot) -> None:
         recorder.pause()
         await interaction.response.send_message("⏸ Recording paused.", ephemeral=True)
 
-    @bot.tree.command(name="capture-resume", description="Resume the active recording")
+    @bot.tree.command(name="session-resume", description="Resume the active recording")
     async def session_resume(interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
         recorder = _active_recorder(bot, interaction.guild.id)
@@ -844,7 +844,7 @@ def _register_commands(bot: SoulogosBot) -> None:
         recorder.resume()
         await interaction.response.send_message("▶ Recording resumed.", ephemeral=True)
 
-    @bot.tree.command(name="capture-list", description="List all recording sessions for this server")
+    @bot.tree.command(name="session-list", description="List all recording sessions for this server")
     async def session_list(interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
 
@@ -857,7 +857,7 @@ def _register_commands(bot: SoulogosBot) -> None:
         view = _SessionListView(bot, sessions)
         await interaction.response.send_message(embed=embed, view=view)
 
-    @bot.tree.command(name="capture-delete", description="Delete a session and all its transcript lines")
+    @bot.tree.command(name="session-delete", description="Delete a session and all its transcript lines")
     @app_commands.describe(session_id="Session ID to delete (e.g. 20260624_131025)")
     async def session_delete(
         interaction: discord.Interaction,
