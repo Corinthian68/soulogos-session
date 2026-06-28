@@ -78,6 +78,14 @@ def _is_hallucination(text: str) -> bool:
     return False
 
 
+def _clean_lines_for_llm(lines: list[dict]) -> list[dict]:
+    """Remove hallucination lines before sending transcript to LLM."""
+    return [
+        line for line in lines
+        if line.get("text") and not _is_hallucination(line["text"])
+    ]
+
+
 class SoulogosBot(discord.Client):
     def __init__(self, config: Config) -> None:
         intents = discord.Intents.default()
@@ -678,7 +686,7 @@ async def _generate_structured_log(bot: SoulogosBot, session_id: str, lines: lis
     >3000-word chunk-and-stitch handling) and OVERWRITES the stored file at
     data/logs/session_{id}_structured.md.
     """
-    transcript_text = _format_transcript_timed(lines)
+    transcript_text = _format_transcript_timed(_clean_lines_for_llm(lines))
     client = anthropic.AsyncAnthropic(api_key=bot.config.anthropic_api_key)
     structured = await _summarize_transcript(
         client, bot.summary_prompt, transcript_text, max_tokens=2048
