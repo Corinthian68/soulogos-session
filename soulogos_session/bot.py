@@ -58,14 +58,21 @@ def _load_recap_prompt(path) -> str:
 
 
 _HALLUCINATION_PATTERNS = [
-    re.compile(r"^\s*[.!?,;:…]+\s*$"),
-    re.compile(r"^(thank you for watching|thanks for watching)", re.IGNORECASE),
+    # Punctuation-only
+    re.compile(r"^\s*[.!?,;:…\-]+\s*$"),
+    # YouTube filler -- full line
+    re.compile(r"^(thank you for watching|thanks for watching|thank you for joining)", re.IGNORECASE),
     re.compile(r"^(don't forget to like|please like and subscribe|like share and subscribe)", re.IGNORECASE),
     re.compile(r"^(subscribe|like and subscribe|please subscribe)", re.IGNORECASE),
-    re.compile(r"^(d&d|dungeons and dragons|ttrpg|dungeon master)[,\s]", re.IGNORECASE),
-    re.compile(r"^(okay|ok|um+|uh+|hmm+)\s*$", re.IGNORECASE),
-    re.compile(r"^bye[\s.!]*$", re.IGNORECASE),
     re.compile(r"(thank you for watching).*(like|share|subscribe)", re.IGNORECASE),
+    # Whisper initial prompt bleed -- lines that are mostly prompt keywords
+    re.compile(r"^(d&d|dungeons and dragons|ttrpg|dungeon master|dnd)[,\s]", re.IGNORECASE),
+    re.compile(r"^ttr[a-z]*\s+[a-z]+\s+[a-z]+", re.IGNORECASE),  # garbled TTRPG variants like TTRTRAGON
+    re.compile(r"(d&d|ttrpg|dungeon master).*(d&d|ttrpg|dungeon master)", re.IGNORECASE),  # repeated prompt keywords
+    # Single filler words
+    re.compile(r"^(okay|ok|um+|uh+|hmm+|ah+|er+)\s*[.!?]?\s*$", re.IGNORECASE),
+    re.compile(r"^bye[\s.!]*$", re.IGNORECASE),
+    re.compile(r"^(yes|no|yeah|nope|yep|nah)\s*[.!?]?\s*$", re.IGNORECASE),
 ]
 
 
