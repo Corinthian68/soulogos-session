@@ -6,6 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.4] - 2026-06-28
+
+### Added
+- **Command rename: `capture-*` to `session-*`.** All slash commands renamed: `/session-join`, `/session-end`, `/session-list`, `/session-delete`, `/session-pause`, `/session-resume`. The `capture-` prefix was a collision workaround; the main bot's conflicting `session-*` commands have been removed, so the correct prefix is restored.
+- **Auto-rejoin on voice disconnect.** When the voice WebSocket drops (error 1006), the bot now attempts to rejoin the last known voice channel up to 3 times with a 2-second wait between attempts. Uses both `on_voice_state_update` (fast path for clean disconnects) and a `_watchdog_loop` background task (backstop for gateway drops where no voice state event is delivered).
+- **Watchdog loop.** A background task runs every 30 seconds and checks whether the bot should be in a voice channel but isn't. If an active session exists and the bot is disconnected, it triggers auto-rejoin.
+- **Hallucination filter.** `_is_hallucination()` added to `bot.py`. Drops known Whisper hallucinations (YouTube filler phrases, D&D prompt bleed, punctuation-only output, repeated phrases) before logging or storing transcript lines.
+- **Pre-filter hallucinations before LLM.** `_clean_lines_for_llm()` strips hallucination lines from the transcript before it is sent to Claude for Condense or Recap, preventing noisy sessions from being flagged as unprocessable.
+- **`/session-merge` command.** DM-only. Merges one or more source sessions into a target session by moving all transcript lines. Source sessions are deleted after merge. Takes `target_id` and comma-separated `source_ids`.
+- **`/session-condense` slash command.** DM-only. Runs the Condense pipeline on a session by ID directly, without needing the `/session-list` embed buttons.
+- **`/session-recap` slash command.** DM-only. Runs the Recap pipeline on a session by ID directly.
+- **Stdout flush.** `sys.stdout.flush()` called after each transcript line is logged, keeping the terminal output live during long sessions.
+- **`queue` property on `Recorder`.** Exposes the transcription queue so auto-rejoin can build a fresh Recorder against a new voice client while reusing the same queue, keeping the transcription task uninterrupted.
+
+### Fixed
+- **Interaction token expiry on `/session-list` buttons.** `/session-condense` and `/session-recap` slash commands replace the need to re-open `/session-list` before each action.
+
+---
+
 ## [0.1.3] - 2026-06-25
 
 ### Added
