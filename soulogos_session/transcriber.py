@@ -12,11 +12,10 @@ _MIN_SAMPLES = int(_WHISPER_RATE * 0.1)  # skip clips shorter than 100 ms
 # Bias Whisper toward fantasy / TTRPG vocabulary so proper nouns and game terms
 # transcribe more reliably.
 _TTRPG_PROMPT = (
-    "Dungeons and Dragons, D&D, TTRPG, dungeon master, DM, player character, PC, "
-    "NPC, hit points, HP, armor class, AC, saving throw, spell slot, initiative, "
-    "Aglarion, Onadbyr, Crown of the Oathbreaker, tavern, dungeon, dragon, paladin, "
-    "rogue, wizard, cleric, fighter, ranger, barbarian, bard, druid, monk, sorcerer, "
-    "warlock."
+    "Aglarion, Onadbyr, Crown of the Oathbreaker, Tarn, Zanthus, Kaelen, Everett, Lorzak, "
+    "Thessaly, Marsden, Kyber, Ricio, Finia, Blister, Rythis, Markya, Belzir, "
+    "paladin, rogue, wizard, cleric, fighter, ranger, barbarian, bard, druid, monk, sorcerer, warlock, "
+    "tavern, dungeon, dragon, cultist, oathbreaker, undead, necromancer."
 )
 
 
