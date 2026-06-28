@@ -20,7 +20,7 @@ Paired with Soulogos (the NPC voice bot), it forms a complete session toolkit: o
 
 - **DAVE E2EE support.** Decrypts Discord's end-to-end encrypted audio (DAVE protocol) so transcription works on voice channels with E2EE active.
 - **Per-user Whisper transcription.** Audio is decoded and buffered per speaker, then transcribed with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), so every line is attributed to the right person.
-- **TTRPG vocabulary bias.** An initial prompt containing D&D terms, spell vocabulary, and campaign-specific proper nouns is passed to Whisper to improve transcription accuracy on fantasy content.
+- **TTRPG vocabulary bias.** An initial prompt containing campaign-specific proper nouns and character names (not generic D&D meta-terms, which cause Whisper echo hallucinations) is passed to Whisper to improve transcription accuracy on fantasy content.
 - **Local SQLite storage.** Sessions and transcript lines live in a local SQLite database. No cloud storage, no third-party retention.
 - **Session names.** Each capture can be tagged with a human-readable name (e.g. "Crown of the Oathbreaker Session 6") that appears in the session list and in the headers of all generated files.
 - **Claude AI documents.** Three distinct AI outputs available per session: a structured DM debrief, a player-facing prose recap, and a generic session summary.
@@ -80,16 +80,21 @@ python -m soulogos_session
 
 | Command | What it does |
 | --- | --- |
-| `/capture-join [channel] [name]` | Joins a voice channel and starts transcribing. Defaults to your current voice channel if none is given. The optional `name` argument tags the session (e.g. "Crown of the Oathbreaker Session 6"). Also posts an ephemeral Pause/Resume control panel. |
-| `/capture-pause` | Pauses the active recording. The bot stays in the voice channel but drops incoming audio at the sink until resumed. Ephemeral. |
-| `/capture-resume` | Resumes a paused recording. Ephemeral. |
-| `/capture-end` | Stops transcribing, leaves the voice channel, and closes out the session. |
-| `/capture-list` | Lists recording sessions for the server as a Discord embed with action buttons for each session. |
-| `/capture-delete <session_id>` | Deletes a session and all of its transcript lines by session ID. |
+| `/session-join [channel] [name]` | Joins a voice channel and starts transcribing. Defaults to your current voice channel if none is given. The optional `name` argument tags the session. Also posts an ephemeral Pause/Resume control panel. |
+| `/session-pause` | Pauses the active recording. The bot stays in the voice channel but drops incoming audio until resumed. |
+| `/session-resume` | Resumes a paused recording. |
+| `/session-end` | Stops transcribing, leaves the voice channel, and closes the session. |
+| `/session-list` | Lists recording sessions for the server as a Discord embed with action buttons. |
+| `/session-delete <session_id>` | Deletes a session and all its transcript lines by session ID. |
+| `/session-merge <target_id> <source_ids>` | Merges one or more sessions (comma-separated source IDs) into a target session. Moves all transcript lines to the target and deletes the sources. DM only. |
+| `/session-condense <session_id>` | Runs the Condense pipeline on a session by ID. Posts structured debrief to #prep-notes. DM only. |
+| `/session-recap <session_id>` | Runs the Recap pipeline on a session by ID. Posts player recap to #session-log. DM only. |
 
 ## Buttons
 
-Each session in the `/capture-list` embed has five buttons. Discord allows up to five buttons per row, so each session occupies one row. Up to four sessions are shown, with a single "Delete All Sessions" button on the bottom row.
+Each session in the `/session-list` embed has five buttons. Discord allows up to five buttons per row, so each session occupies one row. Up to four sessions are shown, with a single "Delete All Sessions" button on the bottom row.
+
+The **Condense** and **Recap** actions are also available as slash commands (`/session-condense` and `/session-recap`) so you do not need to re-open `/session-list` between actions — useful when an embed's interaction token has expired.
 
 ### Delete
 
@@ -121,7 +126,7 @@ One button at the bottom of the embed. Deletes all sessions for this server in a
 
 ## Recording Controls
 
-When you run `/capture-join`, the bot posts an ephemeral panel with **Pause Recording** and **Resume Recording** buttons, visible only to you (the command is used in a player-visible channel). Pausing drops incoming audio packets at the sink level so nothing reaches the transcription queue, while the bot stays connected to the voice channel. The same toggle is available via the `/capture-pause` and `/capture-resume` slash commands.
+When you run `/session-join`, the bot posts an ephemeral panel with **Pause Recording** and **Resume Recording** buttons, visible only to you (the command is used in a player-visible channel). Pausing drops incoming audio packets at the sink level so nothing reaches the transcription queue, while the bot stays connected to the voice channel. The same toggle is available via the `/session-pause` and `/session-resume` slash commands.
 
 ## Channel Configuration
 
@@ -176,7 +181,7 @@ The flow at a glance:
 voice channel -> recorder.py (decrypt, decode, buffer) -> queue
 queue -> bot.py transcription loop -> transcriber.py (Whisper) -> store.py (SQLite)
 
-/capture-list buttons:
+/session-list buttons (and /session-condense, /session-recap slash commands):
   Export   -> plain transcript .md -> #prep-notes (file) + DM (ephemeral)
   Condense -> structured log .md via Claude -> data/logs/ (stored) -> #prep-notes (file) + DM (ephemeral)
   Recap    -> recap .md via Claude (from structured log) -> #session-log (file) + DM (ephemeral)
@@ -185,7 +190,6 @@ queue -> bot.py transcription loop -> transcriber.py (Whisper) -> store.py (SQLi
 
 ## Known limitations
 
-- **discord-ext-voice-recv is inactive.** Voice receive on Discord is not officially supported by discord.py, and the `discord-ext-voice-recv` extension this bot relies on is effectively discontinued. It works today, but it is not actively maintained.
 - **Risk of breakage on Discord protocol changes.** Because voice receive depends on undocumented behavior, a change to Discord's voice or DAVE protocol can break audio capture with little warning. Treat this bot as a useful tool rather than a guaranteed-stable service, and expect to pin dependency versions.
 - **Transcription quality depends on the model and hardware.** Smaller Whisper models are fast but less accurate. Crosstalk, background noise, and accents all reduce accuracy. The transcript is a strong aid, not a perfect record.
 - **Long sessions use multiple Claude calls.** Transcripts over 3000 words are processed in sections. This uses more API tokens and adds latency, but keeps the input within Claude's practical context limits for this use case.
@@ -196,4 +200,4 @@ See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 ## Version
 
-v0.1.3
+v0.1.4
