@@ -78,8 +78,11 @@ class SoulogosBot(discord.Client):
         # (via /session-end). Suppresses auto-rejoin for those disconnects.
         self._ending: set[int] = set()
         # Guilds with an auto-rejoin already in flight, so overlapping
-        # VOICE_STATE_UPDATE events don't spawn duplicate rejoin attempts.
+        # VOICE_STATE_UPDATE events and watchdog ticks don't spawn duplicate
+        # rejoin attempts.
         self._rejoining: set[int] = set()
+        # Background reconciliation task; see _watchdog_loop.
+        self._watchdog_task: asyncio.Task | None = None
 
         _register_commands(self)
 
@@ -92,6 +95,58 @@ class SoulogosBot(discord.Client):
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (id=%s)", self.user, self.user.id)  # type: ignore[union-attr]
+        # on_ready fires again after every gateway reconnect; only ever run one
+        # watchdog at a time.
+        if self._watchdog_task is None or self._watchdog_task.done():
+            self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+            log.info("Voice watchdog started.")
+
+    async def _watchdog_loop(self) -> None:
+        """Reconcile active sessions with the live voice connection every 30s.
+
+        on_voice_state_update is the fast path for clean disconnects, but when
+        the gateway itself drops (WebSocket 1006 / RESUME) voice state events
+        are not delivered, so a dead voice connection would otherwise go
+        unnoticed and transcription would stop silently. This loop compares the
+        desired state (an active session => connected to voice) against reality
+        and triggers a rejoin when they diverge. It must never raise: any error
+        is logged and the loop continues on the next tick.
+        """
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                await asyncio.sleep(30)
+                for guild_id in list(self._active.keys()):
+                    # Intentional teardown or an in-flight rejoin: leave it be.
+                    if guild_id in self._ending or guild_id in self._rejoining:
+                        continue
+                    channel_id = self._last_channel.get(guild_id)
+                    if channel_id is None:
+                        continue
+                    guild = self.get_guild(guild_id)
+                    if guild is None:
+                        continue
+                    vc = guild.voice_client
+                    if (
+                        isinstance(vc, voice_recv.VoiceRecvClient)
+                        and vc.is_connected()
+                    ):
+                        continue  # Still connected; nothing to do.
+                    log.warning(
+                        "watchdog: active session in guild %s but voice is not "
+                        "connected; attempting rejoin of channel %s",
+                        guild_id,
+                        channel_id,
+                    )
+                    self._rejoining.add(guild_id)
+                    try:
+                        await self._auto_rejoin(guild, channel_id)
+                    finally:
+                        self._rejoining.discard(guild_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("watchdog loop iteration failed; continuing")
 
     async def on_voice_state_update(
         self,
@@ -159,6 +214,16 @@ class SoulogosBot(discord.Client):
             # The session may have ended (e.g. /session-end) while we waited.
             if guild.id not in self._active:
                 return
+            # On a gateway drop the dead voice client often stays attached to
+            # the guild; channel.connect() raises "Already connected" while it
+            # lingers, so force it loose first. (Clean disconnects leave
+            # voice_client as None, making this a no-op.)
+            stale = guild.voice_client
+            if stale is not None and not stale.is_connected():
+                try:
+                    await stale.disconnect(force=True)
+                except Exception:
+                    log.debug("auto-rejoin: stale voice client cleanup failed", exc_info=True)
             try:
                 vc = await asyncio.wait_for(
                     channel.connect(cls=voice_recv.VoiceRecvClient),
