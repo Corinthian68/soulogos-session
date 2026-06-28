@@ -71,6 +71,15 @@ class SoulogosBot(discord.Client):
 
         # Active sessions: guild_id -> (session_id, Recorder, asyncio.Task)
         self._active: dict[int, tuple[str, Recorder, asyncio.Task]] = {}
+        # Last voice channel the bot joined per guild: guild_id -> channel_id.
+        # Used to auto-rejoin after an unexpected voice WebSocket drop.
+        self._last_channel: dict[int, int] = {}
+        # Guilds whose voice connection is being torn down intentionally
+        # (via /session-end). Suppresses auto-rejoin for those disconnects.
+        self._ending: set[int] = set()
+        # Guilds with an auto-rejoin already in flight, so overlapping
+        # VOICE_STATE_UPDATE events don't spawn duplicate rejoin attempts.
+        self._rejoining: set[int] = set()
 
         _register_commands(self)
 
@@ -83,6 +92,146 @@ class SoulogosBot(discord.Client):
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (id=%s)", self.user, self.user.id)  # type: ignore[union-attr]
+
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        """Detect unexpected voice disconnects and auto-rejoin.
+
+        Discord occasionally drops the voice WebSocket (close code 1006). The
+        gateway reconnects on its own, but the voice connection is not restored,
+        so transcription stops silently. When the bot itself is dropped from a
+        voice channel mid-session -- and /session-end was not the cause -- we
+        rejoin the same channel and resume the active session.
+        """
+        # Only react to the bot's own state changes, and only to being dropped
+        # from a channel (before set, after cleared) -- not joins or moves.
+        if self.user is None or member.id != self.user.id:
+            return
+        if before.channel is None or after.channel is not None:
+            return
+
+        guild_id = member.guild.id
+        # Intentional teardown via /session-end: nothing to recover.
+        if guild_id in self._ending:
+            return
+        # No active session means there's nothing to resume.
+        if guild_id not in self._active:
+            return
+        # An auto-rejoin is already running for this guild.
+        if guild_id in self._rejoining:
+            return
+
+        self._rejoining.add(guild_id)
+        try:
+            await self._auto_rejoin(member.guild, before.channel.id)
+        finally:
+            self._rejoining.discard(guild_id)
+
+    async def _auto_rejoin(self, guild: discord.Guild, channel_id: int) -> None:
+        """Rejoin ``channel_id`` and reattach the recorder to the live session.
+
+        Retries up to 3 times with a 2-second wait before each attempt. On
+        success logs a WARNING; if every attempt fails, logs an ERROR and marks
+        the session ended.
+        """
+        entry = self._active.get(guild.id)
+        if entry is None:
+            return
+        session_id, recorder, task = entry
+
+        channel = guild.get_channel(channel_id)
+        if not isinstance(channel, discord.VoiceChannel):
+            log.error(
+                "auto-rejoin: voice channel %s in guild %s is gone; ending session %s",
+                channel_id,
+                guild.id,
+                session_id,
+            )
+            await self._mark_session_ended(guild.id)
+            return
+
+        for attempt in range(1, 4):
+            await asyncio.sleep(2)
+            # The session may have ended (e.g. /session-end) while we waited.
+            if guild.id not in self._active:
+                return
+            try:
+                vc = await asyncio.wait_for(
+                    channel.connect(cls=voice_recv.VoiceRecvClient),
+                    timeout=10.0,
+                )
+            except Exception:
+                # As in /session-join, connect() can settle the handshake yet
+                # never return; adopt the live client if discord.py attached one.
+                recovered = guild.voice_client
+                if (
+                    isinstance(recovered, voice_recv.VoiceRecvClient)
+                    and recovered.is_connected()
+                ):
+                    vc = recovered
+                else:
+                    log.warning(
+                        "auto-rejoin attempt %d/3 failed for channel %s (session %s)",
+                        attempt,
+                        channel.name,
+                        session_id,
+                        exc_info=True,
+                    )
+                    continue
+
+            # Reattach a fresh recorder to the new client, reusing the original
+            # queue so the transcription task and session continue uninterrupted.
+            # Preserve the pause state across the reconnect.
+            was_paused = recorder.is_paused
+            try:
+                recorder.stop()
+            except Exception:
+                # The old recorder's voice client is dead; stop is best-effort.
+                pass
+            new_recorder = Recorder(vc, recorder.queue)
+            if was_paused:
+                new_recorder.pause()
+            new_recorder.start()
+            self._active[guild.id] = (session_id, new_recorder, task)
+            self._last_channel[guild.id] = channel.id
+            log.warning(
+                "auto-rejoined voice channel %s after unexpected disconnect "
+                "(attempt %d/3); session %s resumed",
+                channel.name,
+                attempt,
+                session_id,
+            )
+            return
+
+        log.error(
+            "auto-rejoin failed after 3 attempts for channel %s; ending session %s",
+            channel.name,
+            session_id,
+        )
+        await self._mark_session_ended(guild.id)
+
+    async def _mark_session_ended(self, guild_id: int) -> None:
+        """Tear down the active session for a guild (mirrors /session-end)."""
+        entry = self._active.pop(guild_id, None)
+        self._last_channel.pop(guild_id, None)
+        if entry is None:
+            return
+        session_id, recorder, task = entry
+        task.cancel()
+        try:
+            recorder.stop()
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(self.store.end_session(session_id), timeout=5.0)
+        except asyncio.TimeoutError:
+            log.warning("end_session timed out for session %s", session_id)
+        except Exception:
+            log.exception("error ending session %s after failed auto-rejoin", session_id)
 
     async def _transcription_loop(
         self,
@@ -778,6 +927,10 @@ def _register_commands(bot: SoulogosBot) -> None:
             bot._transcription_loop(queue, session_id, player_map)
         )
         bot._active[interaction.guild.id] = (session_id, recorder, task)
+        # Remember the channel so an unexpected voice drop can auto-rejoin it,
+        # and clear any stale intentional-teardown flag from a prior session.
+        bot._last_channel[interaction.guild.id] = target.id
+        bot._ending.discard(interaction.guild.id)
 
         if name:
             confirmation = f"Recording started in **{target.name}** (session `{session_id}`) - {name}"
@@ -805,6 +958,11 @@ def _register_commands(bot: SoulogosBot) -> None:
             if entry is None:
                 await interaction.followup.send("No active recording in this server.", ephemeral=True)
                 return
+
+            # Flag this as an intentional teardown so the disconnect below does
+            # not trip the unexpected-disconnect auto-rejoin handler.
+            bot._ending.add(interaction.guild.id)
+            bot._last_channel.pop(interaction.guild.id, None)
 
             session_id, recorder, task = entry
             task.cancel()

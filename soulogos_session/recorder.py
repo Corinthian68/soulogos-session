@@ -116,7 +116,18 @@ class Recorder:
 
     def __init__(self, voice_client: voice_recv.VoiceRecvClient, queue: asyncio.Queue) -> None:
         self._vc = voice_client
+        self._queue = queue
         self._sink = _TranscriptionSink(voice_client, queue)
+
+    @property
+    def queue(self) -> asyncio.Queue:
+        """The transcription queue this recorder feeds.
+
+        Exposed so an auto-rejoin can build a fresh Recorder against a new
+        voice client while reusing the same queue, keeping the transcription
+        task and session uninterrupted.
+        """
+        return self._queue
 
     def start(self) -> None:
         self._vc.listen(self._sink)
