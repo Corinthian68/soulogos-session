@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from datetime import datetime
 
 import anthropic
@@ -53,6 +54,28 @@ def _load_summary_prompt(path) -> str:
 def _load_recap_prompt(path) -> str:
     """Load the player recap prompt text, falling back to a generic prompt."""
     return _load_prompt(path, _GENERIC_RECAP_PROMPT)
+
+
+_HALLUCINATION_PATTERNS = [
+    re.compile(r"^\s*[.!?,;:…]+\s*$"),
+    re.compile(r"^(thank you for watching|thanks for watching)", re.IGNORECASE),
+    re.compile(r"^(don't forget to like|please like and subscribe|like share and subscribe)", re.IGNORECASE),
+    re.compile(r"^(subscribe|like and subscribe|please subscribe)", re.IGNORECASE),
+    re.compile(r"^(d&d|dungeons and dragons|ttrpg|dungeon master)[,\s]", re.IGNORECASE),
+    re.compile(r"^(okay|ok|um+|uh+|hmm+)\s*$", re.IGNORECASE),
+    re.compile(r"^bye[\s.!]*$", re.IGNORECASE),
+    re.compile(r"(thank you for watching).*(like|share|subscribe)", re.IGNORECASE),
+]
+
+
+def _is_hallucination(text: str) -> bool:
+    t = text.strip()
+    if not t:
+        return True
+    for pat in _HALLUCINATION_PATTERNS:
+        if pat.search(t):
+            return True
+    return False
 
 
 class SoulogosBot(discord.Client):
@@ -314,13 +337,17 @@ class SoulogosBot(discord.Client):
                     timeout=10.0,
                 )
                 if result and result.text:
+                    text = result.text.strip()
+                    if _is_hallucination(text):
+                        log.debug("Dropping hallucination from %s: %r", display, text)
+                        continue
                     char = character_name(player_map, uid, display)
-                    log.info("[%s / %s] %s", display, char, result.text)
+                    log.info("[%s / %s] %s", display, char, text)
                     await self.store.add_line(
                         session_id=session_id,
                         discord_user_id=uid,
                         display_name=char,
-                        text=result.text,
+                        text=text,
                         confidence=result.confidence,
                     )
             except asyncio.TimeoutError:
