@@ -61,7 +61,7 @@ _HALLUCINATION_PATTERNS = [
     # Punctuation-only
     re.compile(r"^\s*[.!?,;:…\-]+\s*$"),
     # YouTube filler -- full line
-    re.compile(r"^(thank you for watching|thanks for watching|thank you for joining)", re.IGNORECASE),
+    re.compile(r"^(thank you for watching|thanks for watching|thank you for joining)\s*[.!?]?\s*$", re.IGNORECASE),
     re.compile(r"^(don't forget to like|please like and subscribe|like share and subscribe)", re.IGNORECASE),
     re.compile(r"^(subscribe|like and subscribe|please subscribe)", re.IGNORECASE),
     re.compile(r"(thank you for watching).*(like|share|subscribe)", re.IGNORECASE),
