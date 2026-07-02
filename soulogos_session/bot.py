@@ -1,8 +1,10 @@
 import asyncio
+import json
 import logging
 import re
 import sys
 from datetime import datetime
+from typing import Literal
 
 import anthropic
 import discord
@@ -13,6 +15,7 @@ from .config import Config
 from .player_lookup import load_player_map, character_name
 from .recorder import Recorder
 from .store import SessionStore
+from .stt_backends import STTBackend, get_available_backends, load_backend
 from .transcriber import Transcriber
 
 log = logging.getLogger(__name__)
@@ -105,6 +108,8 @@ class SoulogosBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.store = SessionStore(config.session_db_path)
         self.transcriber = Transcriber(config.whisper_model, config.whisper_device)
+        self._stt_backends = get_available_backends(config)
+        self._stt_backend: STTBackend = load_backend(self._load_stt_config(), self._stt_backends)
         self.summary_prompt = _load_summary_prompt(config.summary_prompt_path)
         self.recap_prompt = _load_recap_prompt(config.recap_prompt_path)
 
@@ -124,6 +129,25 @@ class SoulogosBot(discord.Client):
         self._watchdog_task: asyncio.Task | None = None
 
         _register_commands(self)
+
+    def _load_stt_config(self) -> str:
+        try:
+            data = json.loads(self.config.stt_config_path.read_text(encoding="utf-8"))
+            return str(data.get("backend", "cpu"))
+        except Exception:
+            return "cpu"
+
+    def _save_stt_config(self, name: str) -> None:
+        self.config.stt_config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config.stt_config_path.write_text(json.dumps({"backend": name}), encoding="utf-8")
+
+    def switch_stt_backend(self, name: str) -> bool:
+        backend = self._stt_backends.get(name)
+        if backend is None or not backend.available:
+            return False
+        self._stt_backend = backend
+        self._save_stt_config(name)
+        return True
 
     async def setup_hook(self) -> None:
         await self.store.init()
@@ -349,7 +373,7 @@ class SoulogosBot(discord.Client):
                 # Run the (blocking) Whisper call off the event loop so it can
                 # never starve the loop, and bail out if it hangs.
                 result = await asyncio.wait_for(
-                    asyncio.to_thread(self.transcriber.transcribe_pcm, pcm),
+                    self._stt_backend.transcribe_pcm(pcm),
                     timeout=10.0,
                 )
                 if result and result.text:
@@ -1293,3 +1317,32 @@ def _register_commands(bot: SoulogosBot) -> None:
         await interaction.followup.send(
             "Recap generated and posted to #session-log.", ephemeral=True
         )
+
+    @bot.tree.command(name="session-stt", description="Show or change the active STT backend")
+    @app_commands.describe(backend="STT backend to switch to")
+    async def session_stt(
+        interaction: discord.Interaction,
+        backend: Literal["cpu", "assemblyai", "rocm"] | None = None,
+    ) -> None:
+        if interaction.channel_id != bot.config.dm_channel_id:
+            await interaction.response.send_message(
+                "This command can only be used in the DM channel.", ephemeral=True
+            )
+            return
+
+        if backend is None:
+            lines = [f"Current backend: `{bot._stt_backend.name}`", ""]
+            for stt_name, stt_backend in bot._stt_backends.items():
+                mark = "✅" if stt_backend.available else "❌"
+                lines.append(f"{mark} {stt_name}")
+            await interaction.response.send_message("\n".join(lines), ephemeral=True)
+            return
+
+        if bot.switch_stt_backend(backend):
+            await interaction.response.send_message(
+                f"Switched STT backend to `{backend}`.", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"Backend `{backend}` is not available.", ephemeral=True
+            )

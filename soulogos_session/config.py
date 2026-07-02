@@ -13,10 +13,12 @@ class Config:
     whisper_model: str
     whisper_device: str
     anthropic_api_key: str = ""
+    assemblyai_api_key: str = ""
     summaries_path: Path = Path("data/summaries")
     logs_path: Path = Path("data/logs")
     summary_prompt_path: Path = Path("data/prompts/crown_summary_prompt.txt")
     recap_prompt_path: Path = Path("data/prompts/crown_recap_prompt.txt")
+    stt_config_path: Path = Path("data/stt_config.json")
     # prep-notes channel (DM only)
     dm_channel_id: int = 1499171448043081911
     # session-log channel (players can see it)
@@ -37,6 +39,7 @@ def load_config() -> Config:
         whisper_model=os.environ.get("WHISPER_MODEL", "base"),
         whisper_device=os.environ.get("WHISPER_DEVICE", "cpu"),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
+        assemblyai_api_key=os.environ.get("ASSEMBLYAI_API_KEY", ""),
         summaries_path=Path(os.environ.get("SUMMARIES_PATH", "data/summaries")),
         logs_path=Path(os.environ.get("LOGS_PATH", "data/logs")),
         summary_prompt_path=Path(
